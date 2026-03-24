@@ -1,13 +1,48 @@
 """Claude Code execution service."""
+import os
+import re
+import base64
+import asyncio
 from typing import AsyncGenerator
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+import anthropic
 
+from app.config import get_settings
 from app.models.task import Task, TaskStatus
 from app.models.instruction import Instruction, InstructionStatus
 from app.models.task_log import TaskLog, LogLevel, LogSource
 from app.services.docker_service import get_docker_service
+
+settings = get_settings()
+
+SYSTEM_PROMPT = """あなたはコード生成AIです。ユーザーの指示に従い、動作するコードファイルを生成します。
+
+## ファイルを作成・更新する際のルール
+
+ファイルを出力するときは必ず以下の形式を使ってください：
+
+=== FILE: ファイルのパス ===
+ファイルの内容
+=== END FILE ===
+
+例：
+=== FILE: index.html ===
+<!DOCTYPE html>
+<html>...</html>
+=== END FILE ===
+
+=== FILE: src/app.py ===
+print("hello")
+=== END FILE ===
+
+## 注意事項
+- 必ず動作する完全なコードを生成してください（省略しない）
+- 複数のファイルが必要な場合はすべて出力してください
+- ファイルパスにディレクトリが含まれる場合、自動的に作成されます
+- 日本語でコメントや説明を書いてもかまいません
+"""
 
 
 class ClaudeCodeService:
@@ -24,26 +59,16 @@ class ClaudeCodeService:
         instruction_content: str,
     ) -> AsyncGenerator[str, None]:
         """
-        Execute Claude Code instruction and stream output.
-
-        Args:
-            db: Database session
-            task_id: Task ID
-            instruction_content: Instruction content
-
-        Yields:
-            Log lines from execution
+        Execute instruction via Anthropic API and stream output.
+        Generated files are written into the task's Docker container.
         """
-        # Get task
         result = await db.execute(select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
 
         if not task:
             raise ValueError("Task not found")
-
         if not task.container_id:
             raise ValueError("Task has no container")
-
         if task.status not in [TaskStatus.IDLE, TaskStatus.RUNNING]:
             raise ValueError(f"Task is not ready (status: {task.status})")
 
@@ -57,110 +82,93 @@ class ClaudeCodeService:
         await db.commit()
         await db.refresh(instruction)
 
+        output_buffer = []
+
+        async def save_log(message: str):
+            log = TaskLog(
+                task_id=task_id,
+                level=LogLevel.INFO,
+                source=LogSource.CLAUDE,
+                message=message,
+                instruction_id=instruction.id,
+            )
+            db.add(log)
+            await db.commit()
+
         try:
-            # Update statuses
             task.status = TaskStatus.RUNNING
             instruction.status = InstructionStatus.RUNNING
             instruction.started_at = datetime.utcnow()
             await db.commit()
 
-            # Log start
-            yield f"[SYSTEM] Starting instruction execution...\n"
-            yield f"[INSTRUCTION] {instruction_content}\n"
-            yield f"[SYSTEM] Container: {task.container_name}\n"
-            yield "\n"
+            yield f"[SYSTEM] 指示を受け付けました\n"
+            yield f"[SYSTEM] {instruction_content}\n\n"
 
-            # For MVP, simulate Claude Code execution with a simple script
-            # In production, replace with actual Claude Code CLI execution
-            command = '''python3 -c "
-import sys
-import time
-
-print('[Claude Code Simulation]')
-print('Received instruction: ''' + instruction_content.replace('"', '\\"').replace("'", "\\'") + '''')
-print()
-print('Processing...')
-time.sleep(1)
-print('Analyzing codebase...')
-time.sleep(1)
-print('Generating changes...')
-time.sleep(1)
-print()
-print('[Result]')
-print('Changes generated successfully.')
-print('Files modified: README')
-print()
-print('[Next Steps]')
-print('Run tests to verify changes.')
-"'''
-
-            # Execute command with streaming
-            output_buffer = []
-            async for chunk in self.docker_service.execute_command_stream(
+            # Get workspace context
+            _, ls_output, _ = self.docker_service.execute_command(
                 task.container_id,
-                command,
-                workdir="/workspace/repo",
-            ):
-                # Yield chunk to client
-                yield chunk
+                "find /workspace/repo -type f | grep -v '.git' | head -30 2>/dev/null || echo '(空のディレクトリ)'",
+                "/workspace",
+            )
+            yield f"[SYSTEM] ワークスペース確認完了\n\n"
 
-                # Store in buffer for database
-                output_buffer.append(chunk)
+            # Call Anthropic API with streaming
+            client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-                # Log to database periodically (every 100 chunks)
-                if len(output_buffer) >= 100:
-                    log_message = "".join(output_buffer)
-                    log = TaskLog(
-                        task_id=task_id,
-                        level=LogLevel.INFO,
-                        source=LogSource.CLAUDE,
-                        message=log_message,
-                        instruction_id=instruction.id,
-                    )
-                    db.add(log)
-                    await db.commit()
-                    output_buffer = []
+            context_msg = f"作業ディレクトリ: /workspace/repo\n現在のファイル:\n{ls_output.strip()}\n\n指示: {instruction_content}"
 
-            # Save remaining buffer
+            full_response = ""
+            yield "[Claude] コードを生成しています...\n\n"
+
+            async with client.messages.stream(
+                model="claude-opus-4-6",
+                max_tokens=8096,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": context_msg}],
+            ) as stream:
+                async for text in stream.text_stream:
+                    yield text
+                    full_response += text
+                    output_buffer.append(text)
+                    if len(output_buffer) >= 50:
+                        await save_log("".join(output_buffer))
+                        output_buffer = []
+
             if output_buffer:
-                log_message = "".join(output_buffer)
-                log = TaskLog(
-                    task_id=task_id,
-                    level=LogLevel.INFO,
-                    source=LogSource.CLAUDE,
-                    message=log_message,
-                    instruction_id=instruction.id,
-                )
-                db.add(log)
-                await db.commit()
+                await save_log("".join(output_buffer))
+                output_buffer = []
 
-            # Update instruction status
+            # Parse FILE blocks and write to container
+            yield "\n\n[SYSTEM] ファイルをワークスペースに書き込んでいます...\n"
+            files_written = await self._write_files_to_container(
+                task.container_id, full_response
+            )
+
+            if files_written:
+                yield f"[SYSTEM] {len(files_written)} 個のファイルを作成しました:\n"
+                for f in files_written:
+                    yield f"  ✓ {f}\n"
+            else:
+                yield "[SYSTEM] ファイルの書き込みはありませんでした\n"
+
             instruction.status = InstructionStatus.COMPLETED
             instruction.completed_at = datetime.utcnow()
-            instruction.output = "".join(output_buffer) if output_buffer else "Completed"
+            instruction.output = full_response
             instruction.exit_code = 0
-
-            # Update task status back to idle
             task.status = TaskStatus.IDLE
             await db.commit()
 
-            yield "\n[SYSTEM] Instruction completed successfully.\n"
+            yield "\n[SYSTEM] 完了しました\n"
 
         except Exception as e:
-            # Handle errors
             error_msg = str(e)
-
-            # Update instruction status
             instruction.status = InstructionStatus.FAILED
             instruction.completed_at = datetime.utcnow()
             instruction.error_message = error_msg
             instruction.exit_code = 1
-
-            # Update task status
-            task.status = TaskStatus.IDLE  # Allow retry
+            task.status = TaskStatus.IDLE
             await db.commit()
 
-            # Log error
             log = TaskLog(
                 task_id=task_id,
                 level=LogLevel.ERROR,
@@ -172,6 +180,49 @@ print('Run tests to verify changes.')
             await db.commit()
 
             yield f"\n[ERROR] {error_msg}\n"
+
+    async def _write_files_to_container(
+        self, container_id: str, response_text: str
+    ) -> list[str]:
+        """Parse === FILE: ... === END FILE === blocks and write to container."""
+        pattern = re.compile(
+            r"=== FILE: (.+?) ===\n(.*?)=== END FILE ===", re.DOTALL
+        )
+        files_written = []
+
+        for match in pattern.finditer(response_text):
+            filepath = match.group(1).strip()
+            content = match.group(2)
+
+            # Remove leading newline if present
+            if content.startswith("\n"):
+                content = content[1:]
+
+            # Create parent directory
+            dir_path = os.path.dirname(filepath)
+            if dir_path:
+                self.docker_service.execute_command(
+                    container_id,
+                    f"mkdir -p /workspace/repo/{dir_path}",
+                    "/workspace/repo",
+                )
+
+            # Write via base64 to avoid shell escaping issues
+            b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+            write_cmd = (
+                f"python3 -c \""
+                f"import base64; "
+                f"open('/workspace/repo/{filepath}', 'w', encoding='utf-8')"
+                f".write(base64.b64decode('{b64}').decode('utf-8'))"
+                f"\""
+            )
+            exit_code, _, _ = self.docker_service.execute_command(
+                container_id, write_cmd, "/workspace/repo"
+            )
+            if exit_code == 0:
+                files_written.append(filepath)
+
+        return files_written
 
 
 # Singleton instance
