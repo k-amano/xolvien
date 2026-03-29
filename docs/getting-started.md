@@ -184,23 +184,40 @@ pip install fastapi "uvicorn[standard]" sqlalchemy asyncpg psycopg2-binary \
     python-multipart websockets aiofiles anthropic
 ```
 
-たくさんの文字が流れます。1〜3分かかります。最後に以下のように表示されれば OK です。
+たくさんの文字が流れます。最後に以下のどちらかが表示されれば OK です。
 
+**初めてインストールする場合：**
 ```
 Successfully installed ...（たくさんのパッケージ名）...
 ```
+
+**すでにインストール済みの場合：**
+```
+Requirement already satisfied: fastapi in ./venv/...
+Requirement already satisfied: sqlalchemy in ./venv/...
+...（各パッケージについて同様の行が続く）
+```
+`Requirement already satisfied` はすでにインストール済みという意味です。問題ありません。
 
 ```bash
 alembic upgrade head
 ```
 
-以下のように表示されれば OK です。
+以下のどちらかが表示されれば OK です。
 
+**初めて実行する場合：**
 ```
-INFO  [alembic.runtime.migration] Context impl PostgreSQLImpl.
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
 INFO  [alembic.runtime.migration] Will assume transactional DDL.
 INFO  [alembic.runtime.migration] Running upgrade  -> xxxxxxxx, Initial migration
 ```
+
+**すでに適用済みの場合：**
+```
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+```
+`Running upgrade` の行が出ない場合は、すでにデータベースが最新の状態になっています。問題ありません。
 
 ---
 
@@ -241,11 +258,31 @@ cd /home/administrator/Projects/karakuri/frontend
 npm install
 ```
 
-文字が流れて、最後に以下のように表示されれば OK です。
+最後に以下のどちらかが表示されれば OK です。
 
+**初めてインストールする場合：**
 ```
 added XXX packages, and audited XXX packages in Xs
 ```
+
+**すでにインストール済みの場合：**
+```
+up to date, audited 231 packages in 46s
+
+48 packages are looking for funding
+  run `npm fund` for details
+
+9 vulnerabilities (3 moderate, 6 high)
+...
+```
+`up to date` はすでにインストール済みという意味です。`vulnerabilities`（脆弱性）の警告が出ることがありますが、ローカル開発環境での使用では問題ありません。無視して進んでください。
+
+表示が終わるとコマンドプロンプト（`$` で終わる行）に戻ります。これで手順7は完了です。
+
+---
+
+> ### ここまでの手順1〜7は初回セットアップです。完了しました。
+> 次の「第2部：起動する」に進みます。
 
 ---
 
