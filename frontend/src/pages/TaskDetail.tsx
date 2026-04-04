@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream } from '../services/api'
+
+type PromptState = 'idle' | 'generating' | 'confirming'
 
 function getStatusLabel(status: TaskStatus): string {
   return status
@@ -91,6 +93,10 @@ export default function TaskDetail() {
   const [instruction, setInstruction] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [promptState, setPromptState] = useState<PromptState>('idle')
+  const [generatedPrompt, setGeneratedPrompt] = useState('')
+  const [feedback, setFeedback] = useState('')
+  const [generating, setGenerating] = useState(false)
 
   const logViewerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -192,17 +198,13 @@ export default function TaskDetail() {
     }
   }, [taskId])
 
-  async function handleExecute() {
-    if (!instruction.trim() || streaming) return
-    const content = instruction.trim()
-    setInstruction('')
+  async function runInstruction(content: string) {
+    if (!content.trim() || streaming) return
     setStreaming(true)
 
-    // Create a stream key for this execution session
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
 
-    // Add an initial stream entry
     setLogEntries(prev => [
       ...prev,
       { kind: 'stream', text: '', key: currentKey },
@@ -220,9 +222,7 @@ export default function TaskDetail() {
           )
         )
       },
-      () => {
-        setStreaming(false)
-      },
+      () => { setStreaming(false) },
       (err: string) => {
         setLogEntries(prev => [
           ...prev,
@@ -243,6 +243,82 @@ export default function TaskDetail() {
     )
   }
 
+  async function handleGeneratePrompt() {
+    if (!instruction.trim() || generating) return
+    setGenerating(true)
+    setGeneratedPrompt('')
+    setPromptState('generating')
+
+    await generatePromptStream(
+      taskId,
+      instruction.trim(),
+      feedback,
+      (chunk) => setGeneratedPrompt(prev => prev + chunk),
+      () => {
+        setGenerating(false)
+        setPromptState('confirming')
+      },
+      (err) => {
+        setGenerating(false)
+        setPromptState('idle')
+        setLogEntries(prev => [
+          ...prev,
+          {
+            kind: 'log',
+            data: {
+              id: Date.now(),
+              task_id: taskId,
+              level: 'error',
+              source: 'system',
+              message: `プロンプト生成エラー: ${err}`,
+              created_at: new Date().toISOString(),
+            },
+          },
+        ])
+      }
+    )
+  }
+
+  async function handleRegenerate() {
+    if (generating) return
+    setGenerating(true)
+    setGeneratedPrompt('')
+    setPromptState('generating')
+
+    await generatePromptStream(
+      taskId,
+      instruction.trim(),
+      feedback,
+      (chunk) => setGeneratedPrompt(prev => prev + chunk),
+      () => {
+        setGenerating(false)
+        setFeedback('')
+        setPromptState('confirming')
+      },
+      (err) => {
+        setGenerating(false)
+        setPromptState('confirming')
+        alert(`再生成エラー: ${err}`)
+      }
+    )
+  }
+
+  function handleConfirmAndExecute() {
+    const prompt = generatedPrompt.trim()
+    if (!prompt) return
+    setPromptState('idle')
+    setInstruction('')
+    setGeneratedPrompt('')
+    setFeedback('')
+    runInstruction(prompt)
+  }
+
+  function handleCancelConfirm() {
+    setPromptState('idle')
+    setGeneratedPrompt('')
+    setFeedback('')
+  }
+
   async function handleStop() {
     if (!task || stopping) return
     setStopping(true)
@@ -256,8 +332,8 @@ export default function TaskDetail() {
     }
   }
 
-  const canExecute =
-    task?.status === 'idle' && !streaming && instruction.trim().length > 0
+  const canGenerate =
+    task?.status === 'idle' && !streaming && !generating && instruction.trim().length > 0 && promptState === 'idle'
 
   const showStopButton =
     task && (task.status === 'running' || task.status === 'idle' || task.status === 'testing')
@@ -386,59 +462,143 @@ export default function TaskDetail() {
 
           {/* Instruction Input Panel */}
           <div className="instruction-panel">
-            <p className="instruction-panel-title">Claudeへの指示</p>
+            {promptState === 'idle' && (
+              <>
+                <p className="instruction-panel-title">Claudeへの指示</p>
+                <textarea
+                  className="instruction-textarea"
+                  value={instruction}
+                  onChange={e => setInstruction(e.target.value)}
+                  placeholder={'指示を入力してください...\n例: シンプルな翻訳アプリを作ってください'}
+                  disabled={streaming || task.status !== 'idle'}
+                  rows={4}
+                />
+                <div className="instruction-footer">
+                  <button
+                    className="btn-primary"
+                    onClick={handleGeneratePrompt}
+                    disabled={!canGenerate}
+                  >
+                    プロンプトを生成
+                  </button>
+                  {(streaming || task.status !== 'idle') && statusMessage && (
+                    <span className="instruction-status">{statusMessage}</span>
+                  )}
+                </div>
+              </>
+            )}
 
-            <textarea
-              className="instruction-textarea"
-              value={instruction}
-              onChange={e => setInstruction(e.target.value)}
-              placeholder={
-                'Claudeへの指示を入力してください...\n例: シンプルな翻訳アプリを作ってください'
-              }
-              disabled={streaming || task.status !== 'idle'}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                  e.preventDefault()
-                  if (canExecute) handleExecute()
-                }
-              }}
-              rows={4}
-            />
+            {promptState === 'generating' && (
+              <>
+                <p className="instruction-panel-title">
+                  <span className="spinner" style={{ marginRight: '8px' }} />
+                  AIがプロンプトを生成しています...
+                </p>
+                <div
+                  style={{
+                    background: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '12px',
+                    fontFamily: 'monospace',
+                    fontSize: '0.82rem',
+                    color: '#94a3b8',
+                    minHeight: '100px',
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {generatedPrompt || '生成中...'}
+                </div>
+              </>
+            )}
 
-            <div className="instruction-footer">
-              <button
-                className="btn-primary"
-                onClick={handleExecute}
-                disabled={!canExecute}
-              >
-                {streaming ? (
-                  <>
-                    <span className="spinner" />
-                    実行中...
-                  </>
-                ) : (
-                  '実行'
-                )}
-              </button>
+            {promptState === 'confirming' && (
+              <>
+                <p className="instruction-panel-title">プロンプト確認</p>
 
-              {(streaming || task.status !== 'idle') && statusMessage && (
-                <span className="instruction-status">{statusMessage}</span>
-              )}
+                <div style={{ marginBottom: '8px' }}>
+                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>
+                    元の指示
+                  </p>
+                  <div
+                    style={{
+                      background: '#1e293b',
+                      border: '1px solid #334155',
+                      borderRadius: '6px',
+                      padding: '8px 12px',
+                      fontSize: '0.85rem',
+                      color: '#64748b',
+                    }}
+                  >
+                    {instruction}
+                  </div>
+                </div>
 
-              {streaming && (
-                <span className="instruction-status">ストリーミング中...</span>
-              )}
+                <div style={{ marginBottom: '8px' }}>
+                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>
+                    生成されたプロンプト
+                  </p>
+                  <div
+                    style={{
+                      background: '#0f172a',
+                      border: '1px solid #6366f1',
+                      borderRadius: '6px',
+                      padding: '12px',
+                      fontFamily: 'monospace',
+                      fontSize: '0.82rem',
+                      color: '#e2e8f0',
+                      maxHeight: '180px',
+                      overflowY: 'auto',
+                      whiteSpace: 'pre-wrap',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {generatedPrompt}
+                  </div>
+                </div>
 
-              <span
-                style={{
-                  marginLeft: 'auto',
-                  fontSize: '0.75rem',
-                  color: '#94a3b8',
-                }}
-              >
-                Ctrl+Enter で実行
-              </span>
-            </div>
+                <div style={{ marginBottom: '8px' }}>
+                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>
+                    このプロンプトへの指摘・追加要望（任意）
+                  </p>
+                  <textarea
+                    className="instruction-textarea"
+                    value={feedback}
+                    onChange={e => setFeedback(e.target.value)}
+                    placeholder="例: エラーメッセージの表示場所も指定してほしい"
+                    rows={2}
+                    style={{ marginBottom: 0 }}
+                  />
+                </div>
+
+                <div className="instruction-footer">
+                  <button
+                    className="btn-primary"
+                    onClick={handleConfirmAndExecute}
+                    disabled={streaming || !generatedPrompt}
+                  >
+                    確定して実行
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={handleRegenerate}
+                    disabled={generating}
+                  >
+                    {generating ? '生成中...' : '再生成'}
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={handleCancelConfirm}
+                    disabled={generating}
+                  >
+                    キャンセル
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>

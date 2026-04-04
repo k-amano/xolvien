@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from sqlalchemy import select as sa_select
 from app.models.task import Task, TaskStatus
 from app.models.instruction import Instruction, InstructionStatus
 from app.models.task_log import TaskLog, LogLevel, LogSource
@@ -77,6 +78,105 @@ class ClaudeCodeService:
             f"\""
         )
         self.docker_service.execute_command(container_id, cmd, "/workspace")
+
+    async def generate_prompt(
+        self,
+        db: AsyncSession,
+        task_id: int,
+        instruction_content: str,
+        feedback: str = "",
+    ) -> AsyncGenerator[str, None]:
+        """
+        Generate an optimized prompt from a brief user instruction.
+        Streams the generated prompt text.
+        """
+        result = await db.execute(sa_select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise ValueError("Task not found")
+        if not task.container_id:
+            raise ValueError("Task has no container")
+
+        # Gather workspace context
+        _, file_list, _ = self.docker_service.execute_command(
+            task.container_id,
+            "find /workspace/repo -type f | grep -v '.git' | head -50 2>/dev/null || echo '(空)'",
+            "/workspace",
+        )
+        _, git_log, _ = self.docker_service.execute_command(
+            task.container_id,
+            "git log --oneline -10 2>/dev/null || echo '(履歴なし)'",
+            "/workspace/repo",
+        )
+        _, readme, _ = self.docker_service.execute_command(
+            task.container_id,
+            "cat /workspace/repo/README.md 2>/dev/null || cat /workspace/repo/README 2>/dev/null || echo '(READMEなし)'",
+            "/workspace/repo",
+        )
+
+        # Get past instructions for this task
+        past_result = await db.execute(
+            sa_select(Instruction)
+            .where(Instruction.task_id == task_id)
+            .where(Instruction.status == InstructionStatus.COMPLETED)
+            .order_by(Instruction.created_at.asc())
+            .limit(5)
+        )
+        past_instructions = past_result.scalars().all()
+        past_text = "\n".join(f"- {i.content}" for i in past_instructions) or "(なし)"
+
+        # Build meta-prompt for prompt generation
+        meta_prompt = f"""あなたはプロンプトエンジニアです。ユーザーの簡潔な指示を、Claude Code CLIに渡す最適なプロンプトに変換してください。
+
+## ワークスペース情報
+
+ファイル一覧:
+{file_list.strip()}
+
+直近のgit履歴:
+{git_log.strip()}
+
+README:
+{readme[:2000].strip()}
+
+このタスクの過去の指示履歴:
+{past_text}
+
+## ユーザーの指示
+
+{instruction_content}
+"""
+        if feedback:
+            meta_prompt += f"""
+## 前回生成したプロンプトへの指摘
+
+{feedback}
+"""
+        meta_prompt += """
+## 出力ルール
+
+上記の情報をもとに、Claude Code CLIへ渡す最適なプロンプトを出力してください。
+プロンプトには以下を含めてください：
+- 対象ファイルのパスを具体的に指定する（ワークスペース情報から推測する）
+- 実装すべき内容を詳細に記述する
+- ファイルを作成・更新する場合は必ず以下の形式で出力するよう指示する：
+  === FILE: ファイルのパス ===
+  ファイルの内容
+  === END FILE ===
+- 必要であれば動作確認の観点も含める
+
+プロンプト本文のみを出力してください。説明や前置きは不要です。
+"""
+
+        self._write_text_to_container(task.container_id, "/tmp/karakuri_prompt.txt", meta_prompt)
+        self._write_text_to_container(task.container_id, "/tmp/karakuri_runner.py", _RUNNER_SCRIPT)
+
+        async for chunk in self.docker_service.execute_command_stream(
+            task.container_id,
+            "python3 /tmp/karakuri_runner.py",
+            "/workspace/repo",
+        ):
+            yield chunk
 
     async def execute_instruction(
         self,

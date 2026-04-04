@@ -49,10 +49,13 @@ class DockerService:
             self.client.volumes.create(name=volume_name)
 
             # Mount host ~/.claude/ for Claude Code CLI authentication
+            # Mount host ~/.ssh/ for GitHub SSH authentication (read-only)
             claude_dir = str(Path.home() / ".claude")
+            ssh_dir = str(Path.home() / ".ssh")
             volumes = {
                 volume_name: {"bind": "/workspace", "mode": "rw"},
                 claude_dir: {"bind": "/root/.claude", "mode": "rw"},
+                ssh_dir: {"bind": "/root/.ssh", "mode": "ro"},
             }
 
             # Start container
@@ -67,23 +70,26 @@ class DockerService:
                     "BRANCH_NAME": branch_name,
                     "GIT_USER_NAME": "Karakuri Bot",
                     "GIT_USER_EMAIL": "bot@karakuri.local",
+                    "GIT_TERMINAL_PROMPT": "0",
                 },
                 working_dir="/workspace",
             )
 
-            # Clone repository
-            clone_cmd = f"git clone {repository_url} repo && cd repo && git checkout -b {branch_name} || git checkout {branch_name}"
+            # Clone repository (disable credential prompting for non-interactive exec)
+            clone_cmd = f"git -c credential.helper= clone {repository_url} repo && cd repo && git checkout -b {branch_name} || git checkout {branch_name}"
             exit_code, output = container.exec_run(
                 ["bash", "-c", clone_cmd],
                 workdir="/workspace",
+                environment={"GIT_TERMINAL_PROMPT": "0"},
             )
 
             if exit_code != 0:
                 # If clone/checkout fails, try without creating new branch
-                clone_cmd = f"git clone {repository_url} repo && cd repo && git checkout {branch_name}"
+                clone_cmd = f"git -c credential.helper= clone {repository_url} repo && cd repo && git checkout {branch_name}"
                 exit_code, output = container.exec_run(
                     ["bash", "-c", clone_cmd],
                     workdir="/workspace",
+                    environment={"GIT_TERMINAL_PROMPT": "0"},
                 )
 
             if exit_code != 0:

@@ -5,6 +5,13 @@ from typing import Optional
 from app.models.instruction import InstructionStatus
 
 
+class GeneratePromptRequest(BaseModel):
+    """Request schema for prompt generation."""
+
+    content: str
+    feedback: Optional[str] = None
+
+
 class InstructionBase(BaseModel):
     """Base instruction schema."""
 

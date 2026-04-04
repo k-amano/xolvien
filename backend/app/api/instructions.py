@@ -8,7 +8,7 @@ from typing import List
 from app.database import get_db
 from app.models.task import Task
 from app.models.instruction import Instruction
-from app.schemas.instruction import InstructionCreate, InstructionResponse
+from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest
 from app.api.auth import verify_token
 from app.services.claude_service import get_claude_service
 
@@ -88,6 +88,42 @@ async def execute_instruction_stream(
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "no-cache",
         },
+    )
+
+
+@router.post("/generate-prompt")
+async def generate_prompt_stream(
+    task_id: int,
+    data: GeneratePromptRequest,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """
+    Generate an optimized prompt from a brief user instruction.
+    Returns a streaming response with the generated prompt text.
+    """
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    claude_service = get_claude_service()
+
+    async def generate():
+        try:
+            async for chunk in claude_service.generate_prompt(
+                db, task_id, data.content, data.feedback or ""
+            ):
+                yield chunk
+        except ValueError as e:
+            yield f"[ERROR] {str(e)}\n"
+        except Exception as e:
+            yield f"[ERROR] Unexpected error: {str(e)}\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-cache"},
     )
 
 
