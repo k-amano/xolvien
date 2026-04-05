@@ -1,5 +1,6 @@
 """Task management endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update as sql_update
 from typing import List
@@ -128,22 +129,28 @@ async def create_task(
     # Get or create default user
     user = await get_or_create_default_user(db)
 
-    # Create task
+    # Create task (branch_name may be None here; auto-assigned below after ID is known)
     task = Task(
         repository_id=task_data.repository_id,
         owner_id=user.id,
         title=task_data.title,
         description=task_data.description,
-        branch_name=task_data.branch_name,
+        branch_name=task_data.branch_name or "",  # temporary, updated below
         status=TaskStatus.PENDING,
     )
     db.add(task)
     await db.commit()
     await db.refresh(task)
 
+    # Auto-generate branch name if not specified
+    if not task_data.branch_name:
+        task.branch_name = f"karakuri/task-{task.id}"
+        await db.commit()
+        await db.refresh(task)
+
     # Log creation
     await log_task_event(
-        db, task.id, f"Task created: {task.title}", source=LogSource.SYSTEM
+        db, task.id, f"Task created: {task.title} (branch: {task.branch_name})", source=LogSource.SYSTEM
     )
 
     # Initialize container in background
@@ -151,7 +158,7 @@ async def create_task(
         initialize_task_container,
         task.id,
         repository.url,
-        task_data.branch_name,
+        task.branch_name,
         str(db.bind.url) if hasattr(db, "bind") else "",
     )
 
@@ -230,6 +237,36 @@ async def stop_task(
     )
 
     return task
+
+
+@router.post("/{task_id}/git/push")
+async def git_push(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """Push the task branch to remote origin."""
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not task.container_id:
+        raise HTTPException(status_code=400, detail="Task has no container")
+
+    docker_service = get_docker_service()
+
+    async def stream():
+        yield f"[GIT] ブランチ '{task.branch_name}' を push しています...\n"
+        async for chunk in docker_service.execute_command_stream(
+            task.container_id,
+            f"git push -u origin {task.branch_name} 2>&1",
+            "/workspace/repo",
+        ):
+            yield chunk
+        yield "\n[GIT] push 完了\n"
+
+    return StreamingResponse(stream(), media_type="text/plain")
 
 
 @router.delete("/{task_id}", status_code=204)

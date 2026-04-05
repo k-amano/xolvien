@@ -284,6 +284,29 @@ README:
                 await save_log("".join(output_buffer))
                 output_buffer = []
 
+            # Auto-commit changes
+            yield "\n[GIT] 変更をコミットしています...\n"
+            commit_msg = instruction_content.replace("\n", " ")[:72]
+            b64_msg = base64.b64encode(commit_msg.encode("utf-8")).decode("ascii")
+            commit_cmd = (
+                "git add -A && "
+                "git diff --cached --quiet && echo '[GIT] 変更なし（コミットスキップ）' || "
+                f"git commit -m \"$(python3 -c \\\"import base64; print(base64.b64decode('{b64_msg}').decode())\\\")\""
+            )
+            _, commit_out, _ = self.docker_service.execute_command(
+                task.container_id, commit_cmd, "/workspace/repo"
+            )
+            if commit_out.strip():
+                yield f"{commit_out.strip()}\n"
+                log = TaskLog(
+                    task_id=task_id,
+                    level=LogLevel.INFO,
+                    source=LogSource.GIT,
+                    message=commit_out.strip(),
+                    instruction_id=instruction.id,
+                )
+                db.add(log)
+
             instruction.status = InstructionStatus.COMPLETED
             instruction.completed_at = datetime.utcnow()
             instruction.output = full_response

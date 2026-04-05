@@ -13,10 +13,13 @@ class TaskBase(BaseModel):
     branch_name: str
 
 
-class TaskCreate(TaskBase):
+class TaskCreate(BaseModel):
     """Task creation schema."""
 
     repository_id: int
+    title: str
+    description: Optional[str] = None
+    branch_name: Optional[str] = None  # Auto-generated as karakuri/task-{id} if omitted
 
 
 class TaskUpdate(BaseModel):
