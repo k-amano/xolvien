@@ -95,6 +95,12 @@ class DockerService:
             if exit_code != 0:
                 raise RuntimeError(f"Failed to clone repository: {output.decode()}")
 
+            # Grant ownership of cloned repo to karakuri user (for agent mode)
+            container.exec_run(
+                ["bash", "-c", "chown -R karakuri:karakuri /workspace/repo 2>/dev/null || true"],
+                workdir="/workspace",
+            )
+
             return container.id, container_name
 
         except Exception as e:

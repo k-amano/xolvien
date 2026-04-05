@@ -1,47 +1,18 @@
 """Claude Code execution service."""
 import os
-import re
 import base64
 import asyncio
 from typing import AsyncGenerator
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-
 from sqlalchemy import select as sa_select
 from app.models.task import Task, TaskStatus
 from app.models.instruction import Instruction, InstructionStatus
 from app.models.task_log import TaskLog, LogLevel, LogSource
 from app.services.docker_service import get_docker_service
 
-SYSTEM_PROMPT = """あなたはコード生成AIです。ユーザーの指示に従い、動作するコードファイルを生成します。
-
-## ファイルを作成・更新する際のルール
-
-ファイルを出力するときは必ず以下の形式を使ってください：
-
-=== FILE: ファイルのパス ===
-ファイルの内容
-=== END FILE ===
-
-例：
-=== FILE: index.html ===
-<!DOCTYPE html>
-<html>...</html>
-=== END FILE ===
-
-=== FILE: src/app.py ===
-print("hello")
-=== END FILE ===
-
-## 注意事項
-- 必ず動作する完全なコードを生成してください（省略しない）
-- 複数のファイルが必要な場合はすべて出力してください
-- ファイルパスにディレクトリが含まれる場合、自動的に作成されます
-- 日本語でコメントや説明を書いてもかまいません
-"""
-
-# Python script written into the container to invoke Claude Code CLI and stream output
+# Python script for text-only generation (prompt generation)
 _RUNNER_SCRIPT = """\
 import subprocess, sys, os
 prompt = open('/tmp/karakuri_prompt.txt', encoding='utf-8').read()
@@ -51,6 +22,60 @@ proc = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     env=env,
+)
+for chunk in iter(lambda: proc.stdout.read(512), b''):
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+proc.wait()
+sys.exit(proc.returncode)
+"""
+
+# Python script for agent mode execution (file read/write/bash tools enabled)
+# Drops privileges to non-root karakuri user so --dangerously-skip-permissions is allowed
+_RUNNER_SCRIPT_AGENT = """\
+import subprocess, sys, os, shutil, pwd
+
+prompt = open('/tmp/karakuri_prompt.txt', encoding='utf-8').read()
+
+try:
+    pw = pwd.getpwnam('karakuri')
+    uid, gid, home = pw.pw_uid, pw.pw_gid, pw.pw_dir
+except KeyError:
+    uid = gid = None
+    home = '/root'
+
+if uid is not None:
+    for d in ['.claude', '.ssh']:
+        src, dst = f'/root/{d}', f'{home}/{d}'
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copytree(src, dst, symlinks=True)
+            for dirpath, dirs, files in os.walk(dst):
+                os.chown(dirpath, uid, gid)
+                for f in files:
+                    try:
+                        os.chown(os.path.join(dirpath, f), uid, gid)
+                    except Exception:
+                        pass
+
+    def drop_privs():
+        os.setgid(gid)
+        os.setuid(uid)
+
+    cmd = ['claude', '--dangerously-skip-permissions', '-p', prompt]
+    env = {**os.environ, 'HOME': home}
+    preexec = drop_privs
+else:
+    cmd = ['claude', '-p', prompt, '--output-format', 'text']
+    env = {**os.environ, 'HOME': '/root'}
+    preexec = None
+
+proc = subprocess.Popen(
+    cmd,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    env=env,
+    cwd='/workspace/repo',
+    preexec_fn=preexec,
 )
 for chunk in iter(lambda: proc.stdout.read(512), b''):
     sys.stdout.buffer.write(chunk)
@@ -114,6 +139,34 @@ class ClaudeCodeService:
             "/workspace/repo",
         )
 
+        # Read source file contents (exclude binary/lock files, limit total size)
+        _, source_files_raw, _ = self.docker_service.execute_command(
+            task.container_id,
+            (
+                "find /workspace/repo -type f "
+                r"| grep -v '.git' "
+                r"| grep -v -E '\.(png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|pdf|zip|tar|gz|lock|min\.js|min\.css)$' "
+                "| head -30"
+            ),
+            "/workspace",
+        )
+        file_contents_section = ""
+        total_chars = 0
+        for fpath in source_files_raw.strip().splitlines():
+            fpath = fpath.strip()
+            if not fpath:
+                continue
+            _, content, _ = self.docker_service.execute_command(
+                task.container_id,
+                f"cat {fpath} 2>/dev/null",
+                "/workspace",
+            )
+            if total_chars + len(content) > 12000:
+                file_contents_section += f"\n--- {fpath} (省略: 文字数制限)\n"
+                break
+            file_contents_section += f"\n--- {fpath}\n{content}\n"
+            total_chars += len(content)
+
         # Get past instructions for this task
         past_result = await db.execute(
             sa_select(Instruction)
@@ -139,6 +192,9 @@ class ClaudeCodeService:
 README:
 {readme[:2000].strip()}
 
+ソースファイルの内容:
+{file_contents_section.strip() or "(ファイルなし)"}
+
 このタスクの過去の指示履歴:
 {past_text}
 
@@ -155,15 +211,14 @@ README:
         meta_prompt += """
 ## 出力ルール
 
-上記の情報をもとに、Claude Code CLIへ渡す最適なプロンプトを出力してください。
+上記の情報をもとに、Claude Code CLIエージェントへ渡す最適なプロンプトを出力してください。
 プロンプトには以下を含めてください：
-- 対象ファイルのパスを具体的に指定する（ワークスペース情報から推測する）
+- 対象ファイルのパスを具体的に指定する（ソースファイルの内容から正確に把握する）
 - 実装すべき内容を詳細に記述する
-- ファイルを作成・更新する場合は必ず以下の形式で出力するよう指示する：
-  === FILE: ファイルのパス ===
-  ファイルの内容
-  === END FILE ===
 - 必要であれば動作確認の観点も含める
+
+注意: Claude Code CLIはエージェントモードで実行されるため、ファイルの読み書きやコマンド実行は自動で行われます。
+出力形式の指定は不要です。
 
 プロンプト本文のみを出力してください。説明や前置きは不要です。
 """
@@ -185,8 +240,8 @@ README:
         instruction_content: str,
     ) -> AsyncGenerator[str, None]:
         """
-        Execute instruction via Claude Code CLI inside the task container and stream output.
-        Generated files (=== FILE: ... === blocks) are written into /workspace/repo.
+        Execute instruction via Claude Code CLI agent mode inside the task container.
+        Claude has full tool access (file read/write/bash) via --dangerously-skip-permissions.
         """
         result = await db.execute(select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
@@ -230,24 +285,9 @@ README:
             yield f"[SYSTEM] 指示を受け付けました\n"
             yield f"[SYSTEM] {instruction_content}\n\n"
 
-            # Get workspace file listing for context
-            _, ls_output, _ = self.docker_service.execute_command(
-                task.container_id,
-                "find /workspace/repo -type f | grep -v '.git' | head -30 2>/dev/null || echo '(空のディレクトリ)'",
-                "/workspace",
-            )
-            yield "[SYSTEM] ワークスペース確認完了\n\n"
-
-            # Build full prompt
-            full_prompt = (
-                SYSTEM_PROMPT
-                + f"\n\n作業ディレクトリ: /workspace/repo\n現在のファイル:\n{ls_output.strip()}"
-                + f"\n\nユーザーの指示: {instruction_content}"
-            )
-
-            # Write prompt and runner script into the container
-            self._write_text_to_container(task.container_id, "/tmp/karakuri_prompt.txt", full_prompt)
-            self._write_text_to_container(task.container_id, "/tmp/karakuri_runner.py", _RUNNER_SCRIPT)
+            # Write prompt and agent runner script into the container
+            self._write_text_to_container(task.container_id, "/tmp/karakuri_prompt.txt", instruction_content)
+            self._write_text_to_container(task.container_id, "/tmp/karakuri_runner.py", _RUNNER_SCRIPT_AGENT)
 
             yield "[Claude] Claude Code CLIを実行しています...\n\n"
 
@@ -267,19 +307,6 @@ README:
             if output_buffer:
                 await save_log("".join(output_buffer))
                 output_buffer = []
-
-            # Parse FILE blocks and write to container
-            yield "\n\n[SYSTEM] ファイルをワークスペースに書き込んでいます...\n"
-            files_written = await self._write_files_to_container(
-                task.container_id, full_response
-            )
-
-            if files_written:
-                yield f"[SYSTEM] {len(files_written)} 個のファイルを作成しました:\n"
-                for f in files_written:
-                    yield f"  ✓ {f}\n"
-            else:
-                yield "[SYSTEM] ファイルの書き込みはありませんでした\n"
 
             instruction.status = InstructionStatus.COMPLETED
             instruction.completed_at = datetime.utcnow()
@@ -311,48 +338,6 @@ README:
 
             yield f"\n[ERROR] {error_msg}\n"
 
-    async def _write_files_to_container(
-        self, container_id: str, response_text: str
-    ) -> list[str]:
-        """Parse === FILE: ... === END FILE === blocks and write to container."""
-        pattern = re.compile(
-            r"=== FILE: (.+?) ===\n(.*?)=== END FILE ===", re.DOTALL
-        )
-        files_written = []
-
-        for match in pattern.finditer(response_text):
-            filepath = match.group(1).strip()
-            content = match.group(2)
-
-            # Remove leading newline if present
-            if content.startswith("\n"):
-                content = content[1:]
-
-            # Create parent directory
-            dir_path = os.path.dirname(filepath)
-            if dir_path:
-                self.docker_service.execute_command(
-                    container_id,
-                    f"mkdir -p /workspace/repo/{dir_path}",
-                    "/workspace/repo",
-                )
-
-            # Write via base64 to avoid shell escaping issues
-            b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-            write_cmd = (
-                f"python3 -c \""
-                f"import base64; "
-                f"open('/workspace/repo/{filepath}', 'w', encoding='utf-8')"
-                f".write(base64.b64decode('{b64}').decode('utf-8'))"
-                f"\""
-            )
-            exit_code, _, _ = self.docker_service.execute_command(
-                container_id, write_cmd, "/workspace/repo"
-            )
-            if exit_code == 0:
-                files_written.append(filepath)
-
-        return files_written
 
 
 # Singleton instance
