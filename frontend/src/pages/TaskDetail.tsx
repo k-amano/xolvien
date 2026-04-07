@@ -107,7 +107,7 @@ export default function TaskDetail() {
   // Resizable split pane
   const bodyRef = useRef<HTMLDivElement>(null)
   const isDraggingRef = useRef(false)
-  const [logHeightPercent, setLogHeightPercent] = useState(50)
+  const [logHeightPercent, setLogHeightPercent] = useState(30)
 
   useEffect(() => {
     function onMouseMove(e: MouseEvent) {
@@ -579,7 +579,6 @@ export default function TaskDetail() {
                   onChange={e => setInstruction(e.target.value)}
                   placeholder={'指示を入力してください...\n例: シンプルな翻訳アプリを作ってください'}
                   disabled={streaming || task.status !== 'idle'}
-                  rows={4}
                 />
                 <div className="instruction-footer">
                   <button
@@ -645,8 +644,8 @@ export default function TaskDetail() {
                   </div>
                 </div>
 
-                <div style={{ marginBottom: '8px' }}>
-                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, marginBottom: '8px' }}>
+                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px', flexShrink: 0 }}>
                     生成されたプロンプト
                   </p>
                   <div
@@ -658,10 +657,11 @@ export default function TaskDetail() {
                       fontFamily: 'monospace',
                       fontSize: '0.82rem',
                       color: '#e2e8f0',
-                      maxHeight: '180px',
+                      flex: 1,
                       overflowY: 'auto',
                       whiteSpace: 'pre-wrap',
                       lineHeight: 1.5,
+                      minHeight: 0,
                     }}
                   >
                     {generatedPrompt}

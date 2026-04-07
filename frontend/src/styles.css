@@ -485,11 +485,12 @@ button:disabled {
 .instruction-panel {
   background: #ffffff;
   border-top: 2px solid #e2e8f0;
-  padding: 20px 24px;
+  padding: 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .instruction-panel-title {
@@ -501,6 +502,7 @@ button:disabled {
 
 .instruction-textarea {
   width: 100%;
+  flex: 1;
   min-height: 80px;
   padding: 10px 12px;
   font-family: inherit;
@@ -509,7 +511,7 @@ button:disabled {
   border-radius: 6px;
   background: #f8fafc;
   color: #1a1a2e;
-  resize: vertical;
+  resize: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   outline: none;
 }
