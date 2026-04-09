@@ -13,15 +13,13 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js (required for some Claude Code features)
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+# Install Node.js 20 (LTS, required by Claude Code CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
-# Note: In production, install via npm or download from official source
-RUN npm install -g @anthropic-ai/claude-code || \
-    echo "Claude Code CLI installation placeholder - install manually if needed"
+RUN npm install -g @anthropic-ai/claude-code
 
 # Create non-root user for Claude Code agent mode (--dangerously-skip-permissions requires non-root)
 RUN useradd -m -s /bin/bash karakuri
