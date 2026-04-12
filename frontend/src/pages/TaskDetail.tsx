@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream } from '../services/api'
 
-type PromptState = 'idle' | 'clarifying' | 'generating' | 'confirming'
+type PromptState = 'idle' | 'clarifying' | 'generating' | 'confirming' | 'test_cases' | 'running_tests' | 'reviewing'
 
 type ChatMessage = { role: 'assistant' | 'user'; content: string }
 
@@ -105,6 +105,14 @@ export default function TaskDetail() {
   const [clarifying, setClarifying] = useState(false)
   const [clarifyStreamText, setClarifyStreamText] = useState('')
 
+  // Test case generation state
+  const [generatedTestCases, setGeneratedTestCases] = useState('')
+  const [editableTestCases, setEditableTestCases] = useState('')
+  const [generatingTestCases, setGeneratingTestCases] = useState(false)
+  const [runningTests, setRunningTests] = useState(false)
+  // The implementation prompt that was confirmed for execution (saved to pass into test flow)
+  const [confirmedPrompt, setConfirmedPrompt] = useState('')
+
   const logViewerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const seenLogIdsRef = useRef<Set<number>>(new Set())
@@ -141,6 +149,13 @@ export default function TaskDetail() {
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
   }
+
+  // Sync editable test cases when generation finishes
+  useEffect(() => {
+    if (!generatingTestCases && generatedTestCases && !editableTestCases) {
+      setEditableTestCases(generatedTestCases)
+    }
+  }, [generatingTestCases, generatedTestCases, editableTestCases])
 
   // Auto-scroll log viewer
   const scrollToBottom = useCallback(() => {
@@ -484,14 +499,46 @@ export default function TaskDetail() {
     )
   }
 
-  function handleConfirmAndExecute() {
+  async function handleConfirmAndExecute() {
     const prompt = generatedPrompt.trim()
     if (!prompt) return
+    setConfirmedPrompt(prompt)
     setPromptState('idle')
     setInstruction('')
     setGeneratedPrompt('')
     setFeedback('')
-    runInstruction(prompt)
+
+    // Run implementation
+    await runInstruction(prompt)
+
+    // After implementation completes, generate test cases
+    setPromptState('test_cases')
+    setGeneratedTestCases('')
+    setEditableTestCases('')
+    setGeneratingTestCases(true)
+    await generateTestCasesStream(
+      taskId,
+      prompt,
+      (chunk) => setGeneratedTestCases(prev => prev + chunk),
+      () => setGeneratingTestCases(false),
+      (err) => {
+        setGeneratingTestCases(false)
+        setLogEntries(prev => [
+          ...prev,
+          {
+            kind: 'log',
+            data: {
+              id: Date.now(),
+              task_id: taskId,
+              level: 'error',
+              source: 'system',
+              message: `テストケース生成エラー: ${err}`,
+              created_at: new Date().toISOString(),
+            },
+          },
+        ])
+      }
+    )
   }
 
   function handleCancelConfirm() {
@@ -505,6 +552,70 @@ export default function TaskDetail() {
     setClarifyHistory([])
     setClarifyStreamText('')
     setClarifyInput('')
+  }
+
+  async function handleApproveTestCases() {
+    if (!editableTestCases.trim() || runningTests) return
+    setRunningTests(true)
+    setPromptState('running_tests')
+
+    streamKeyRef.current += 1
+    const currentKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+
+    await runUnitTestsStream(
+      taskId,
+      confirmedPrompt,
+      editableTestCases,
+      (chunk) => {
+        setLogEntries(prev =>
+          prev.map(entry =>
+            entry.kind === 'stream' && entry.key === currentKey
+              ? { ...entry, text: entry.text + chunk }
+              : entry
+          )
+        )
+      },
+      () => {
+        setRunningTests(false)
+        setPromptState('reviewing')
+      },
+      (err) => {
+        setRunningTests(false)
+        setPromptState('reviewing')
+        setLogEntries(prev => [
+          ...prev,
+          {
+            kind: 'log',
+            data: {
+              id: Date.now(),
+              task_id: taskId,
+              level: 'error',
+              source: 'system',
+              message: `テスト実行エラー: ${err}`,
+              created_at: new Date().toISOString(),
+            },
+          },
+        ])
+      }
+    )
+  }
+
+  function handleApproveImplementation() {
+    // User approved — go back to idle
+    setPromptState('idle')
+    setConfirmedPrompt('')
+    setGeneratedTestCases('')
+    setEditableTestCases('')
+  }
+
+  function handleRejectImplementation() {
+    // User wants to revise — go back to idle with instruction pre-filled
+    setPromptState('idle')
+    setInstruction(confirmedPrompt)
+    setConfirmedPrompt('')
+    setGeneratedTestCases('')
+    setEditableTestCases('')
   }
 
   async function handleGitPush() {
@@ -561,7 +672,7 @@ export default function TaskDetail() {
   }
 
   const canGenerate =
-    task?.status === 'idle' && !streaming && !generating && !clarifying && instruction.trim().length > 0 && promptState === 'idle'
+    task?.status === 'idle' && !streaming && !generating && !clarifying && !generatingTestCases && !runningTests && instruction.trim().length > 0 && promptState === 'idle'
 
   const showStopButton =
     task && (task.status === 'running' || task.status === 'idle' || task.status === 'testing')
@@ -662,7 +773,7 @@ export default function TaskDetail() {
           {/* Left: Log Viewer */}
           <div style={{ display: 'flex', flexDirection: 'column', flex: `0 0 ${logWidthPercent}%`, minWidth: 0, overflow: 'hidden', paddingLeft: '24px' }}>
             {/* Running status banner */}
-            {(streaming || task.status === 'running' || task.status === 'initializing' || generating || clarifying) && (
+            {(streaming || task.status === 'running' || task.status === 'initializing' || task.status === 'testing' || generating || clarifying || generatingTestCases || runningTests) && (
               <div style={{
                 background: '#1e3a5f',
                 borderBottom: '1px solid #2563eb',
@@ -679,6 +790,10 @@ export default function TaskDetail() {
                   ? '要件を確認しています...'
                   : generating
                   ? 'プロンプト生成中...'
+                  : generatingTestCases
+                  ? 'テストケースを生成しています...'
+                  : runningTests || task.status === 'testing'
+                  ? 'テストを実行しています...'
                   : task.status === 'initializing'
                   ? 'コンテナを準備中... (30秒〜1分かかります)'
                   : '実行中... (完了まで1〜3分かかることがあります)'}
@@ -899,6 +1014,110 @@ export default function TaskDetail() {
                   }}
                 >
                   {generatedPrompt || '生成中...'}
+                </div>
+              </>
+            )}
+
+            {(promptState === 'test_cases' || promptState === 'running_tests') && (
+              <>
+                <p className="instruction-panel-title">
+                  テストケース確認
+                  <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 'normal', marginLeft: '8px' }}>
+                    — 承認後にテストコードを生成・実行します
+                  </span>
+                </p>
+
+                {generatingTestCases ? (
+                  <div style={{
+                    background: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '12px',
+                    fontFamily: 'monospace',
+                    fontSize: '0.82rem',
+                    color: '#94a3b8',
+                    flex: 1,
+                    overflowY: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    lineHeight: 1.5,
+                    minHeight: 0,
+                  }}>
+                    {generatedTestCases || 'テストケースを生成中...'}
+                  </div>
+                ) : (
+                  <textarea
+                    className="instruction-textarea"
+                    value={editableTestCases}
+                    onChange={e => setEditableTestCases(e.target.value)}
+                    placeholder="テストケース一覧..."
+                    style={{ flex: 1, minHeight: '200px', fontFamily: 'monospace', fontSize: '0.82rem' }}
+                    disabled={runningTests}
+                  />
+                )}
+
+                <div className="instruction-footer">
+                  <button
+                    className="btn-primary"
+                    onClick={handleApproveTestCases}
+                    disabled={generatingTestCases || runningTests || !editableTestCases.trim()}
+                  >
+                    {runningTests ? 'テスト実行中...' : '承認してテスト実行'}
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={() => { setPromptState('idle'); setGeneratedTestCases(''); setEditableTestCases('') }}
+                    disabled={generatingTestCases || runningTests}
+                  >
+                    スキップ
+                  </button>
+                </div>
+              </>
+            )}
+
+            {promptState === 'reviewing' && (
+              <>
+                <p className="instruction-panel-title">
+                  実装確認
+                  <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 'normal', marginLeft: '8px' }}>
+                    — テスト完了。実装を確認してください
+                  </span>
+                </p>
+
+                <div style={{
+                  background: '#0f172a',
+                  border: '1px solid #334155',
+                  borderRadius: '6px',
+                  padding: '12px',
+                  fontSize: '0.82rem',
+                  color: '#94a3b8',
+                  marginBottom: '8px',
+                }}>
+                  <p style={{ margin: '0 0 8px', color: '#6366f1', fontSize: '0.75rem' }}>実行されたプロンプト</p>
+                  <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1' }}>{confirmedPrompt}</div>
+                </div>
+
+                <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '12px', fontSize: '0.82rem', color: '#94a3b8', flex: 1, marginBottom: '8px' }}>
+                  <p style={{ margin: '0 0 4px', color: '#6366f1', fontSize: '0.75rem' }}>承認済みテストケース</p>
+                  <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1', overflowY: 'auto', maxHeight: '200px' }}>{editableTestCases}</div>
+                </div>
+
+                <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0 0 8px' }}>
+                  テスト結果と変更内容をログで確認してください。問題なければ「承認」、修正が必要なら「差し戻し」を選択してください。
+                </p>
+
+                <div className="instruction-footer">
+                  <button
+                    className="btn-primary"
+                    onClick={handleApproveImplementation}
+                  >
+                    承認
+                  </button>
+                  <button
+                    className="btn-danger"
+                    onClick={handleRejectImplementation}
+                  >
+                    差し戻し
+                  </button>
                 </div>
               </>
             )}

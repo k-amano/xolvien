@@ -2,6 +2,7 @@
 import os
 import base64
 import asyncio
+import json
 from typing import AsyncGenerator
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy import select as sa_select
 from app.models.task import Task, TaskStatus
 from app.models.instruction import Instruction, InstructionStatus
+from app.models.test_run import TestRun, TestType
 from app.models.task_log import TaskLog, LogLevel, LogSource
 from app.services.docker_service import get_docker_service
 
@@ -425,6 +427,293 @@ README:
 
             yield f"\n[ERROR] {error_msg}\n"
 
+
+    async def generate_test_cases(
+        self,
+        db: AsyncSession,
+        task_id: int,
+        implementation_prompt: str,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Generate test case list (not code) for a given implementation prompt.
+        Streams Markdown text listing test cases (normal / error / edge cases).
+        """
+        result = await db.execute(sa_select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise ValueError("Task not found")
+        if not task.container_id:
+            raise ValueError("Task has no container")
+
+        _, file_list, _ = self.docker_service.execute_command(
+            task.container_id,
+            "find /workspace/repo -type f | grep -v '.git' | grep -v '__pycache__' | grep -v 'node_modules' 2>/dev/null || echo '(空)'",
+            "/workspace",
+        )
+
+        prompt = f"""あなたはテスト設計の専門家です。以下の実装プロンプトに基づいて、単体テストのテストケース一覧を生成してください。
+
+## 実装予定の内容
+{implementation_prompt}
+
+## プロジェクトのファイル一覧
+{file_list.strip()}
+
+## 出力形式
+以下のMarkdown形式でテストケース一覧を出力してください。テストコードは生成しないでください。
+
+```
+## テストケース一覧
+
+### 正常系
+- [ ] テストケース名: 説明
+
+### 異常系
+- [ ] テストケース名: 説明
+
+### 境界値
+- [ ] テストケース名: 説明（該当する場合のみ）
+```
+
+テストケースの粒度は「機能単位」とし、正常系・異常系・境界値を網羅してください。
+テストコードや実装の詳細は含めず、テストケース名と説明のみを出力してください。
+"""
+
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", prompt)
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT)
+
+        async for chunk in self.docker_service.execute_command_stream(
+            task.container_id,
+            "python3 /tmp/xolvien_runner.py",
+            "/workspace/repo",
+        ):
+            yield chunk
+
+    async def run_unit_tests(
+        self,
+        db: AsyncSession,
+        task_id: int,
+        implementation_prompt: str,
+        test_cases: str,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Generate test code from approved test cases, run tests, auto-fix up to 3 times.
+        Streams progress logs. Saves TestRun record on completion.
+        """
+        result = await db.execute(sa_select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise ValueError("Task not found")
+        if not task.container_id:
+            raise ValueError("Task has no container")
+
+        # Determine test command from project structure
+        _, pkg_json, _ = self.docker_service.execute_command(
+            task.container_id,
+            "cat /workspace/repo/package.json 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        _, pyproject, _ = self.docker_service.execute_command(
+            task.container_id,
+            "cat /workspace/repo/pyproject.toml 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        _, requirements, _ = self.docker_service.execute_command(
+            task.container_id,
+            "ls /workspace/repo/requirements*.txt 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+
+        if 'pytest' in pyproject or requirements.strip():
+            test_command = "python -m pytest -v 2>&1"
+        elif pkg_json.strip():
+            test_command = "npm test -- --watchAll=false 2>&1"
+        else:
+            test_command = "python -m pytest -v 2>&1"
+
+        # Create TestRun record
+        test_run = TestRun(
+            task_id=task_id,
+            test_type=TestType.UNIT,
+            test_command=test_command,
+            test_cases=test_cases,
+            started_at=datetime.utcnow(),
+        )
+        db.add(test_run)
+        await db.commit()
+        await db.refresh(test_run)
+
+        task.status = TaskStatus.TESTING
+        await db.commit()
+
+        yield f"[TEST] テストコードを生成しています...\n"
+
+        # Step 1: Generate test code
+        _, file_list, _ = self.docker_service.execute_command(
+            task.container_id,
+            "find /workspace/repo -type f | grep -v '.git' | grep -v '__pycache__' | grep -v 'node_modules' 2>/dev/null",
+            "/workspace",
+        )
+
+        gen_prompt = f"""あなたはテストコード生成の専門家です。以下の実装プロンプトとテストケース一覧に基づいて、テストコードを生成してください。
+
+## 実装予定の内容
+{implementation_prompt}
+
+## 承認済みテストケース一覧
+{test_cases}
+
+## プロジェクトのファイル一覧
+{file_list.strip()}
+
+## 指示
+1. プロジェクトの構成（package.json, pyproject.toml等）から使用するテストフレームワークを判断してください
+2. 既存のテストファイルがあれば確認して、命名規則や構造に従ってください
+3. 承認済みテストケース一覧の全ケースをカバーするテストコードを生成してください
+4. テストファイルを /workspace/repo の適切な場所に書き込んでください
+5. 実装コードがまだ存在しない場合は、テストが失敗することを前提にして書いてください（TDDアプローチ）
+
+テストコードの生成と書き込みのみを行ってください。実装コードの変更は不要です。
+"""
+
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", gen_prompt)
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
+
+        async for chunk in self.docker_service.execute_command_stream(
+            task.container_id,
+            "python3 /tmp/xolvien_runner.py",
+            "/workspace/repo",
+        ):
+            yield chunk
+
+        yield f"\n[TEST] テストを実行しています: {test_command}\n"
+
+        max_retries = 3
+        passed = False
+        last_output = ""
+        last_error = ""
+
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                yield f"\n[TEST] 自動修正 ({attempt}/{max_retries})...\n"
+
+                # Auto-fix: give Claude the failure output
+                fix_prompt = f"""テストが失敗しました。テストコードまたは実装コードを修正してください。
+
+## 実装プロンプト
+{implementation_prompt}
+
+## テストケース一覧
+{test_cases}
+
+## テストコマンド
+{test_command}
+
+## テスト失敗の出力
+{last_output[-3000:] if len(last_output) > 3000 else last_output}
+
+## エラー出力
+{last_error[-1000:] if len(last_error) > 1000 else last_error}
+
+## 指示
+上記の失敗を修正してください。テストコードか実装コードのどちらに問題があるか判断し、修正してください。
+全テストケースがパスするまで修正を続けてください。
+"""
+                self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", fix_prompt)
+                self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
+
+                async for chunk in self.docker_service.execute_command_stream(
+                    task.container_id,
+                    "python3 /tmp/xolvien_runner.py",
+                    "/workspace/repo",
+                ):
+                    yield chunk
+
+                yield f"\n[TEST] 修正後にテストを再実行しています...\n"
+
+            exit_code, output, error = self.docker_service.execute_command(
+                task.container_id,
+                test_command,
+                "/workspace/repo",
+            )
+            last_output = output
+            last_error = error
+
+            if output.strip():
+                yield output
+            if error.strip():
+                yield f"[STDERR] {error}\n"
+
+            passed = exit_code == 0
+            test_run.retry_count = attempt
+            test_run.exit_code = exit_code
+            test_run.passed = passed
+            test_run.output = output
+            test_run.error_output = error
+
+            if passed:
+                yield f"\n[TEST] テストがパスしました\n"
+                break
+            else:
+                if attempt < max_retries:
+                    yield f"\n[TEST] テストが失敗しました (試行 {attempt + 1}/{max_retries + 1})\n"
+                else:
+                    yield f"\n[TEST] 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
+
+        # Save test report as Markdown
+        now_str = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        report_filename = f"test-report-{now_str}-unit.md"
+        report_path = f"/workspace/repo/test-reports/{report_filename}"
+
+        report_content = f"""# テストレポート
+
+- 実行日時: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
+- テスト種別: 単体テスト
+- テストコマンド: {test_command}
+- 結果: {"✅ PASS" if passed else "❌ FAIL"}
+- リトライ回数: {test_run.retry_count}
+
+## テストケース一覧
+{test_cases}
+
+## テスト実行ログ
+```
+{last_output[-5000:] if len(last_output) > 5000 else last_output}
+```
+"""
+
+        self.docker_service.execute_command(
+            task.container_id,
+            f"mkdir -p /workspace/repo/test-reports",
+            "/workspace/repo",
+        )
+        self._write_text_to_container(task.container_id, report_path, report_content)
+
+        # Commit test code and report
+        commit_msg = f"test: add unit tests ({'pass' if passed else 'fail'})"
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_commit_msg.txt", commit_msg)
+        _, commit_out, _ = self.docker_service.execute_command(
+            task.container_id,
+            "git add -A && git diff --cached --quiet && echo '[GIT] 変更なし' || git commit -F /tmp/xolvien_commit_msg.txt",
+            "/workspace/repo",
+        )
+        if commit_out.strip():
+            yield f"[GIT] {commit_out.strip()}\n"
+
+        # Finalize TestRun record
+        from app.services.test_service import get_test_service
+        test_service = get_test_service()
+        summary = test_service._parse_test_summary(last_output, test_command)
+        test_run.summary = summary
+        test_run.report_path = report_path
+        test_run.completed_at = datetime.utcnow()
+        await db.commit()
+
+        task.status = TaskStatus.IDLE
+        await db.commit()
+
+        yield f"\n[TEST] レポートを保存しました: {report_path}\n"
+        yield f"\n[SYSTEM] テスト完了: {summary}\n"
 
 
 # Singleton instance

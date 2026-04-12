@@ -8,7 +8,7 @@ from typing import List
 from app.database import get_db
 from app.models.task import Task
 from app.models.instruction import Instruction
-from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest
+from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest
 from app.api.auth import verify_token
 from app.services.claude_service import get_claude_service
 
@@ -150,6 +150,79 @@ async def clarify_requirements_stream(
         try:
             async for chunk in claude_service.clarify_requirements(
                 db, task_id, data.instruction, [m.model_dump() for m in data.history]
+            ):
+                yield chunk
+        except ValueError as e:
+            yield f"[ERROR] {str(e)}\n"
+        except Exception as e:
+            yield f"[ERROR] Unexpected error: {str(e)}\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.post("/generate-test-cases")
+async def generate_test_cases_stream(
+    task_id: int,
+    data: GenerateTestCasesRequest,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """
+    Generate a test case list (Markdown) from an implementation prompt.
+    Returns a streaming response. The user reviews and approves test cases
+    before test code is generated.
+    """
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    claude_service = get_claude_service()
+
+    async def generate():
+        try:
+            async for chunk in claude_service.generate_test_cases(
+                db, task_id, data.implementation_prompt
+            ):
+                yield chunk
+        except ValueError as e:
+            yield f"[ERROR] {str(e)}\n"
+        except Exception as e:
+            yield f"[ERROR] Unexpected error: {str(e)}\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.post("/run-unit-tests")
+async def run_unit_tests_stream(
+    task_id: int,
+    data: RunUnitTestsRequest,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """
+    Generate test code from approved test cases, execute tests, and auto-fix
+    up to 3 times. Streams progress output.
+    """
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    claude_service = get_claude_service()
+
+    async def generate():
+        try:
+            async for chunk in claude_service.run_unit_tests(
+                db, task_id, data.implementation_prompt, data.test_cases
             ):
                 yield chunk
         except ValueError as e:

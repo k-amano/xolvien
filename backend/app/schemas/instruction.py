@@ -5,6 +5,17 @@ from typing import Optional, List, Literal
 from app.models.instruction import InstructionStatus
 
 
+class GenerateTestCasesRequest(BaseModel):
+    """Request schema for test case generation."""
+    implementation_prompt: str
+
+
+class RunUnitTestsRequest(BaseModel):
+    """Request schema for running unit tests."""
+    implementation_prompt: str
+    test_cases: str
+
+
 class GeneratePromptRequest(BaseModel):
     """Request schema for prompt generation."""
 

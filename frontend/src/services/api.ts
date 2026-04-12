@@ -192,6 +192,97 @@ export async function generatePromptStream(
   }
 }
 
+export async function generateTestCasesStream(
+  taskId: number,
+  implementationPrompt: string,
+  onChunk: (text: string) => void,
+  onDone: () => void,
+  onError: (err: string) => void
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `/api/v1/tasks/${taskId}/instructions/generate-test-cases`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${AUTH_TOKEN}`,
+        },
+        body: JSON.stringify({ implementation_prompt: implementationPrompt }),
+      }
+    )
+
+    if (!response.ok) {
+      const text = await response.text()
+      onError(`HTTP ${response.status}: ${text}`)
+      return
+    }
+
+    if (!response.body) {
+      onError('No response body')
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      if (chunk) onChunk(chunk)
+    }
+    onDone()
+  } catch (err) {
+    onError(err instanceof Error ? err.message : String(err))
+  }
+}
+
+export async function runUnitTestsStream(
+  taskId: number,
+  implementationPrompt: string,
+  testCases: string,
+  onChunk: (text: string) => void,
+  onDone: () => void,
+  onError: (err: string) => void
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `/api/v1/tasks/${taskId}/instructions/run-unit-tests`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${AUTH_TOKEN}`,
+        },
+        body: JSON.stringify({ implementation_prompt: implementationPrompt, test_cases: testCases }),
+      }
+    )
+
+    if (!response.ok) {
+      const text = await response.text()
+      onError(`HTTP ${response.status}: ${text}`)
+      return
+    }
+
+    if (!response.body) {
+      onError('No response body')
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      if (chunk) onChunk(chunk)
+    }
+    onDone()
+  } catch (err) {
+    onError(err instanceof Error ? err.message : String(err))
+  }
+}
+
 export async function executeInstructionStream(
   taskId: number,
   content: string,
