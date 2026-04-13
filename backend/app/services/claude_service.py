@@ -489,6 +489,57 @@ README:
         ):
             yield chunk
 
+    def _detect_test_command(self, container_id: str) -> str | None:
+        """
+        Detect the test command from the project structure.
+        Returns the command string, or None if no test framework is found.
+        """
+        # Check for Python test frameworks
+        _, pyproject, _ = self.docker_service.execute_command(
+            container_id,
+            "cat /workspace/repo/pyproject.toml 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        _, req_files, _ = self.docker_service.execute_command(
+            container_id,
+            "ls /workspace/repo/requirements*.txt 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        _, setup_py, _ = self.docker_service.execute_command(
+            container_id,
+            "test -f /workspace/repo/setup.py && echo 'exists' || echo ''",
+            "/workspace/repo",
+        )
+
+        is_python = (
+            'pytest' in pyproject
+            or 'unittest' in pyproject
+            or (req_files.strip() and req_files.strip() != '')
+            or setup_py.strip() == 'exists'
+        )
+
+        if is_python:
+            # Verify pytest is actually installed
+            _, pytest_check, _ = self.docker_service.execute_command(
+                container_id,
+                "python -m pytest --version 2>/dev/null && echo 'ok' || echo 'missing'",
+                "/workspace/repo",
+            )
+            if 'missing' in pytest_check:
+                return None  # pytest not installed — caller should install first
+            return "python -m pytest -v 2>&1"
+
+        # Check for Node.js test frameworks
+        _, pkg_json, _ = self.docker_service.execute_command(
+            container_id,
+            "cat /workspace/repo/package.json 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        if pkg_json.strip():
+            return "npm test -- --watchAll=false 2>&1"
+
+        return None
+
     async def run_unit_tests(
         self,
         db: AsyncSession,
@@ -507,35 +558,13 @@ README:
         if not task.container_id:
             raise ValueError("Task has no container")
 
-        # Determine test command from project structure
-        _, pkg_json, _ = self.docker_service.execute_command(
-            task.container_id,
-            "cat /workspace/repo/package.json 2>/dev/null || echo ''",
-            "/workspace/repo",
-        )
-        _, pyproject, _ = self.docker_service.execute_command(
-            task.container_id,
-            "cat /workspace/repo/pyproject.toml 2>/dev/null || echo ''",
-            "/workspace/repo",
-        )
-        _, requirements, _ = self.docker_service.execute_command(
-            task.container_id,
-            "ls /workspace/repo/requirements*.txt 2>/dev/null || echo ''",
-            "/workspace/repo",
-        )
+        task.status = TaskStatus.TESTING
+        await db.commit()
 
-        if 'pytest' in pyproject or requirements.strip():
-            test_command = "python -m pytest -v 2>&1"
-        elif pkg_json.strip():
-            test_command = "npm test -- --watchAll=false 2>&1"
-        else:
-            test_command = "python -m pytest -v 2>&1"
-
-        # Create TestRun record
+        # Create TestRun record (test_command determined after code gen)
         test_run = TestRun(
             task_id=task_id,
             test_type=TestType.UNIT,
-            test_command=test_command,
             test_cases=test_cases,
             started_at=datetime.utcnow(),
         )
@@ -543,21 +572,18 @@ README:
         await db.commit()
         await db.refresh(test_run)
 
-        task.status = TaskStatus.TESTING
-        await db.commit()
+        yield "[TEST] テストコードを生成しています...\n"
 
-        yield f"[TEST] テストコードを生成しています...\n"
-
-        # Step 1: Generate test code
+        # Step 1: Generate test code — Claude also installs deps and runs tests itself
         _, file_list, _ = self.docker_service.execute_command(
             task.container_id,
             "find /workspace/repo -type f | grep -v '.git' | grep -v '__pycache__' | grep -v 'node_modules' 2>/dev/null",
             "/workspace",
         )
 
-        gen_prompt = f"""あなたはテストコード生成の専門家です。以下の実装プロンプトとテストケース一覧に基づいて、テストコードを生成してください。
+        gen_prompt = f"""あなたはテストコード生成の専門家です。以下の手順をすべて実行してください。
 
-## 実装予定の内容
+## 実装内容
 {implementation_prompt}
 
 ## 承認済みテストケース一覧
@@ -566,25 +592,50 @@ README:
 ## プロジェクトのファイル一覧
 {file_list.strip()}
 
-## 指示
-1. プロジェクトの構成（package.json, pyproject.toml等）から使用するテストフレームワークを判断してください
-2. 既存のテストファイルがあれば確認して、命名規則や構造に従ってください
-3. 承認済みテストケース一覧の全ケースをカバーするテストコードを生成してください
-4. テストファイルを /workspace/repo の適切な場所に書き込んでください
-5. 実装コードがまだ存在しない場合は、テストが失敗することを前提にして書いてください（TDDアプローチ）
+## 実行手順（順番通りに行うこと）
 
-テストコードの生成と書き込みのみを行ってください。実装コードの変更は不要です。
+1. `package.json` や `pyproject.toml`、`requirements*.txt` を読み込み、プロジェクトのテストフレームワーク（Jest, pytest 等）を特定してください
+2. 既存のテストファイルがあれば確認して、命名規則や構造に従ってください
+3. 承認済みテストケース一覧の全ケースをカバーするテストコードを生成し、適切な場所に書き込んでください
+4. テストの実行に必要な依存パッケージをインストールしてください（例: `npm install`, `pip install pytest` 等）
+5. テストを実行してください（例: `npm test -- --watchAll=false`, `python -m pytest -v` 等）
+6. テスト実行結果（パス数、失敗数、エラー内容）を出力してください
+
+注意:
+- テストコードの生成・書き込み・依存インストール・テスト実行をすべて行ってください
+- 依存パッケージが不足している場合は必ずインストールしてから実行してください
+- テスト結果の出力は必ず含めてください
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", gen_prompt)
         self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
 
+        claude_output = ""
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
             "python3 /tmp/xolvien_runner.py",
             "/workspace/repo",
         ):
             yield chunk
+            claude_output += chunk
+
+        # Step 2: Detect test command from project structure (after Claude may have installed deps)
+        test_command = self._detect_test_command(task.container_id)
+
+        if test_command is None:
+            yield "\n[TEST] テストフレームワークが見つかりません。テストコードを確認してください。\n"
+            test_run.passed = False
+            test_run.exit_code = -1
+            test_run.error_output = "No test framework detected"
+            test_run.completed_at = datetime.utcnow()
+            test_run.summary = "テストフレームワーク未検出"
+            await db.commit()
+            task.status = TaskStatus.IDLE
+            await db.commit()
+            return
+
+        test_run.test_command = test_command
+        await db.commit()
 
         yield f"\n[TEST] テストを実行しています: {test_command}\n"
 
@@ -597,10 +648,9 @@ README:
             if attempt > 0:
                 yield f"\n[TEST] 自動修正 ({attempt}/{max_retries})...\n"
 
-                # Auto-fix: give Claude the failure output
-                fix_prompt = f"""テストが失敗しました。テストコードまたは実装コードを修正してください。
+                fix_prompt = f"""テストが失敗しました。原因を特定して修正してください。
 
-## 実装プロンプト
+## 実装内容
 {implementation_prompt}
 
 ## テストケース一覧
@@ -609,15 +659,17 @@ README:
 ## テストコマンド
 {test_command}
 
-## テスト失敗の出力
+## テスト実行の出力
 {last_output[-3000:] if len(last_output) > 3000 else last_output}
 
-## エラー出力
+## 標準エラー出力
 {last_error[-1000:] if len(last_error) > 1000 else last_error}
 
 ## 指示
-上記の失敗を修正してください。テストコードか実装コードのどちらに問題があるか判断し、修正してください。
-全テストケースがパスするまで修正を続けてください。
+1. 失敗の原因を特定してください（テストコードの問題か、実装コードの問題か）
+2. 原因を修正してください
+3. 依存パッケージが不足している場合はインストールしてください
+4. テストを再実行して結果を出力してください（`{test_command}` を必ず実行すること）
 """
                 self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", fix_prompt)
                 self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
@@ -629,7 +681,7 @@ README:
                 ):
                     yield chunk
 
-                yield f"\n[TEST] 修正後にテストを再実行しています...\n"
+                yield f"\n[TEST] テストを再実行しています...\n"
 
             exit_code, output, error = self.docker_service.execute_command(
                 task.container_id,
@@ -639,10 +691,10 @@ README:
             last_output = output
             last_error = error
 
-            if output.strip():
-                yield output
-            if error.strip():
-                yield f"[STDERR] {error}\n"
+            # Always show test output
+            combined = (output + "\n" + error).strip()
+            if combined:
+                yield combined + "\n"
 
             passed = exit_code == 0
             test_run.retry_count = attempt
@@ -652,42 +704,55 @@ README:
             test_run.error_output = error
 
             if passed:
-                yield f"\n[TEST] テストがパスしました\n"
+                yield f"\n[TEST] ✅ テストがパスしました\n"
                 break
             else:
                 if attempt < max_retries:
-                    yield f"\n[TEST] テストが失敗しました (試行 {attempt + 1}/{max_retries + 1})\n"
+                    yield f"\n[TEST] ❌ テストが失敗しました (試行 {attempt + 1}/{max_retries + 1})\n"
                 else:
                     yield f"\n[TEST] 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
 
-        # Save test report as Markdown
+        # Save test report
+        from app.services.test_service import get_test_service
+        test_service = get_test_service()
+        summary = test_service._parse_test_summary(last_output, test_command)
+        test_run.summary = summary
+
         now_str = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         report_filename = f"test-report-{now_str}-unit.md"
         report_path = f"/workspace/repo/test-reports/{report_filename}"
 
-        report_content = f"""# テストレポート
+        report_content = f"""# テストレポート（単体テスト）
 
-- 実行日時: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
-- テスト種別: 単体テスト
-- テストコマンド: {test_command}
-- 結果: {"✅ PASS" if passed else "❌ FAIL"}
-- リトライ回数: {test_run.retry_count}
+| 項目 | 値 |
+|---|---|
+| 実行日時 | {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC |
+| テストコマンド | `{test_command}` |
+| 結果 | {"✅ PASS" if passed else "❌ FAIL"} |
+| リトライ回数 | {test_run.retry_count} |
+| サマリー | {summary} |
 
 ## テストケース一覧
+
 {test_cases}
 
 ## テスト実行ログ
+
 ```
-{last_output[-5000:] if len(last_output) > 5000 else last_output}
+{(last_output + chr(10) + last_error).strip()[-5000:]}
 ```
 """
 
         self.docker_service.execute_command(
             task.container_id,
-            f"mkdir -p /workspace/repo/test-reports",
+            "mkdir -p /workspace/repo/test-reports",
             "/workspace/repo",
         )
         self._write_text_to_container(task.container_id, report_path, report_content)
+
+        test_run.report_path = report_path
+        test_run.completed_at = datetime.utcnow()
+        await db.commit()
 
         # Commit test code and report
         commit_msg = f"test: add unit tests ({'pass' if passed else 'fail'})"
@@ -699,15 +764,6 @@ README:
         )
         if commit_out.strip():
             yield f"[GIT] {commit_out.strip()}\n"
-
-        # Finalize TestRun record
-        from app.services.test_service import get_test_service
-        test_service = get_test_service()
-        summary = test_service._parse_test_summary(last_output, test_command)
-        test_run.summary = summary
-        test_run.report_path = report_path
-        test_run.completed_at = datetime.utcnow()
-        await db.commit()
 
         task.status = TaskStatus.IDLE
         await db.commit()

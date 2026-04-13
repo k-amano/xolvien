@@ -1055,6 +1055,12 @@ export default function TaskDetail() {
                   />
                 )}
 
+                {!generatingTestCases && !runningTests && (
+                  <p style={{ fontSize: '0.75rem', color: '#64748b', margin: '0 0 6px', flexShrink: 0 }}>
+                    テストケースを直接編集できます。修正後に承認してください。
+                  </p>
+                )}
+
                 <div className="instruction-footer">
                   <button
                     className="btn-primary"
@@ -1062,6 +1068,30 @@ export default function TaskDetail() {
                     disabled={generatingTestCases || runningTests || !editableTestCases.trim()}
                   >
                     {runningTests ? 'テスト実行中...' : '承認してテスト実行'}
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={() => {
+                      // Re-generate test cases with user feedback
+                      const feedback = window.prompt('テストケースの修正内容を入力してください（Claudeに再生成を依頼します）:')
+                      if (feedback === null) return
+                      setGeneratedTestCases('')
+                      setEditableTestCases('')
+                      setGeneratingTestCases(true)
+                      generateTestCasesStream(
+                        taskId,
+                        confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + feedback,
+                        (chunk) => setGeneratedTestCases(prev => prev + chunk),
+                        () => setGeneratingTestCases(false),
+                        (err) => {
+                          setGeneratingTestCases(false)
+                          alert(`テストケース再生成エラー: ${err}`)
+                        }
+                      )
+                    }}
+                    disabled={generatingTestCases || runningTests}
+                  >
+                    修正を依頼
                   </button>
                   <button
                     className="btn-secondary"
