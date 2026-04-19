@@ -1,4 +1,6 @@
 """Docker container management service."""
+import codecs
+import time
 import docker
 from docker.models.containers import Container
 from docker.errors import DockerException, NotFound
@@ -118,6 +120,23 @@ class DockerService:
                 pass
             raise RuntimeError(f"Failed to create workspace container: {e}")
 
+    def ensure_container_running(self, container_id: str) -> None:
+        """Start the container if it is stopped."""
+        try:
+            container = self.client.containers.get(container_id)
+            if container.status != "running":
+                container.start()
+                # Wait until running (max 30s)
+                for _ in range(30):
+                    container.reload()
+                    if container.status == "running":
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError(f"Container {container_id} did not start in time")
+        except NotFound:
+            raise RuntimeError(f"Container {container_id} not found")
+
     def execute_command(
         self,
         container_id: str,
@@ -136,6 +155,7 @@ class DockerService:
             Tuple of (exit_code, stdout, stderr)
         """
         try:
+            self.ensure_container_running(container_id)
             container = self.client.containers.get(container_id)
             exit_code, output = container.exec_run(
                 ["bash", "-c", command],
@@ -165,6 +185,7 @@ class DockerService:
             Output lines
         """
         try:
+            self.ensure_container_running(container_id)
             container = self.client.containers.get(container_id)
 
             # Execute with streaming
@@ -175,13 +196,17 @@ class DockerService:
                 demux=False,
             )
 
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             for chunk in exec_instance.output:
                 if chunk:
-                    # Decode and yield each chunk
-                    text = chunk.decode("utf-8", errors="replace")
-                    yield text
-                    # Small delay to prevent overwhelming the client
+                    text = decoder.decode(chunk)
+                    if text:
+                        yield text
                     await asyncio.sleep(0.01)
+            # Flush any remaining bytes at end of stream
+            remaining = decoder.decode(b"", final=True)
+            if remaining:
+                yield remaining
 
         except NotFound:
             raise RuntimeError(f"Container {container_id} not found")

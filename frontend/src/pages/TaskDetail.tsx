@@ -7,7 +7,7 @@ type PromptState = 'idle' | 'clarifying' | 'generating' | 'confirming' | 'test_c
 
 type ChatMessage = { role: 'assistant' | 'user'; content: string }
 
-type StepId = 'implement' | 'test_cases' | 'unit_test' | 'integration_test' | 'e2e_test' | 'review'
+type StepId = 'implement' | 'unit_test' | 'integration_test' | 'e2e_test' | 'review'
 type StepStatus = 'done_pass' | 'done_fail' | 'active' | 'pending'
 
 interface StepInfo {
@@ -126,10 +126,10 @@ export default function TaskDetail() {
   const [confirmedPrompt, setConfirmedPrompt] = useState('')
   // Resume / step navigation state
   const [resumeChecked, setResumeChecked] = useState(false)
+  const [selectedStep, setSelectedStep] = useState<StepId | null>(null)
   const [steps, setSteps] = useState<StepInfo[]>([
-    { id: 'implement',         label: '実装',         status: 'pending' },
-    { id: 'test_cases',        label: 'テストケース', status: 'pending' },
-    { id: 'unit_test',         label: '単体テスト',   status: 'pending' },
+    { id: 'implement',         label: '実装',       status: 'pending' },
+    { id: 'unit_test',         label: '単体テスト', status: 'pending' },
     { id: 'integration_test',  label: '結合テスト',   status: 'pending', future: true },
     { id: 'e2e_test',          label: 'E2Eテスト',   status: 'pending', future: true },
     { id: 'review',            label: '実装確認',     status: 'pending' },
@@ -213,14 +213,8 @@ export default function TaskDetail() {
               return hasImpl
                 ? { ...step, status: 'done_pass' }
                 : step
-            case 'test_cases':
-              return lastUnit
-                ? { ...step, status: 'done_pass' }
-                : hasImpl
-                ? { ...step, status: 'active' }
-                : step
             case 'unit_test':
-              if (!lastUnit) return hasImpl ? { ...step, status: 'pending' } : step
+              if (!lastUnit) return hasImpl ? { ...step, status: 'active' } : step
               return lastUnit.passed
                 ? { ...step, status: 'done_pass', resultLabel: lastUnit.summary ?? undefined }
                 : { ...step, status: 'done_fail', resultLabel: lastUnit.summary ?? undefined }
@@ -236,10 +230,13 @@ export default function TaskDetail() {
         // Auto-navigate to the most appropriate step
         if (lastUnit?.passed) {
           setPromptState('reviewing')
+          setSelectedStep('review')
         } else if (lastUnit) {
           setPromptState('test_cases')
+          setSelectedStep('unit_test')
         } else if (hasImpl) {
           setPromptState('test_cases')
+          setSelectedStep('unit_test')
         }
       } catch {
         // Ignore errors — start fresh
@@ -681,7 +678,6 @@ export default function TaskDetail() {
           const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
           if (lastUnit) {
             setSteps(prev => prev.map(s => {
-              if (s.id === 'test_cases') return { ...s, status: 'done_pass' }
               if (s.id === 'unit_test')  return {
                 ...s,
                 status: lastUnit.passed ? 'done_pass' : 'done_fail',
@@ -717,17 +713,16 @@ export default function TaskDetail() {
   function handleStepClick(stepId: StepId) {
     if (streaming || runningTests || generatingTestCases || generating || clarifying) return
 
+    setSelectedStep(stepId)
+
     switch (stepId) {
       case 'implement':
-        // Restore instruction from confirmedPrompt and go to idle
         if (confirmedPrompt) setInstruction(confirmedPrompt)
         setPromptState('idle')
         setGeneratedPrompt('')
         setFeedback('')
         break
-      case 'test_cases':
       case 'unit_test':
-        // Show test case panel with previously saved test cases
         setPromptState('test_cases')
         break
       case 'review':
@@ -991,14 +986,18 @@ export default function TaskDetail() {
                   && !streaming && !runningTests && !generatingTestCases && !generating && !clarifying
                   && (step.status !== 'pending' || step.id === 'implement')
 
-                const bgColor = step.future
+                const isSelected = selectedStep === step.id
+
+                const bgColor = isSelected
+                  ? '#facc15'
+                  : step.future
                   ? 'transparent'
                   : step.status === 'done_pass' ? '#16a34a'
                   : step.status === 'done_fail' ? '#dc2626'
                   : step.status === 'active'    ? '#2563eb'
                   : '#334155'
 
-                const textColor = step.future ? '#475569' : '#fff'
+                const textColor = isSelected ? '#1e1e1e' : step.future ? '#475569' : '#fff'
 
                 const icon = step.future ? '○'
                   : step.status === 'done_pass' ? '✅'
@@ -1013,7 +1012,6 @@ export default function TaskDetail() {
                     )}
                     <button
                       onClick={() => isClickable && handleStepClick(step.id)}
-                      title={step.resultLabel}
                       style={{
                         background: bgColor,
                         color: textColor,
@@ -1021,7 +1019,7 @@ export default function TaskDetail() {
                         borderRadius: '4px',
                         padding: '3px 8px',
                         fontSize: '0.75rem',
-                        fontWeight: step.status === 'active' ? 700 : 400,
+                        fontWeight: step.status === 'active' || isSelected ? 700 : 400,
                         cursor: isClickable ? 'pointer' : 'default',
                         opacity: step.future ? 0.5 : 1,
                         display: 'flex',
@@ -1032,9 +1030,6 @@ export default function TaskDetail() {
                     >
                       <span>{icon}</span>
                       <span>{step.label}</span>
-                      {step.resultLabel && (
-                        <span style={{ fontSize: '0.7rem', opacity: 0.85 }}>({step.resultLabel})</span>
-                      )}
                     </button>
                   </div>
                 )
