@@ -480,7 +480,7 @@ README:
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", prompt)
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT)
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
 
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
@@ -493,16 +493,21 @@ README:
         """
         Detect the test command from the project structure.
         Returns the command string, or None if no test framework is found.
+        package.json is checked first — Node.js projects may also have requirements.txt.
         """
+        # Check Node.js first (package.json is unambiguous)
+        _, pkg_json, _ = self.docker_service.execute_command(
+            container_id,
+            "cat /workspace/repo/package.json 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        if pkg_json.strip():
+            return "npm test -- --watchAll=false 2>&1"
+
         # Check for Python test frameworks
         _, pyproject, _ = self.docker_service.execute_command(
             container_id,
             "cat /workspace/repo/pyproject.toml 2>/dev/null || echo ''",
-            "/workspace/repo",
-        )
-        _, req_files, _ = self.docker_service.execute_command(
-            container_id,
-            "ls /workspace/repo/requirements*.txt 2>/dev/null || echo ''",
             "/workspace/repo",
         )
         _, setup_py, _ = self.docker_service.execute_command(
@@ -510,12 +515,17 @@ README:
             "test -f /workspace/repo/setup.py && echo 'exists' || echo ''",
             "/workspace/repo",
         )
+        _, req_files, _ = self.docker_service.execute_command(
+            container_id,
+            "ls /workspace/repo/requirements*.txt 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
 
         is_python = (
             'pytest' in pyproject
             or 'unittest' in pyproject
-            or (req_files.strip() and req_files.strip() != '')
             or setup_py.strip() == 'exists'
+            or req_files.strip() != ''
         )
 
         if is_python:
@@ -528,15 +538,6 @@ README:
             if 'missing' in pytest_check:
                 return None  # pytest not installed — caller should install first
             return "python -m pytest -v 2>&1"
-
-        # Check for Node.js test frameworks
-        _, pkg_json, _ = self.docker_service.execute_command(
-            container_id,
-            "cat /workspace/repo/package.json 2>/dev/null || echo ''",
-            "/workspace/repo",
-        )
-        if pkg_json.strip():
-            return "npm test -- --watchAll=false 2>&1"
 
         return None
 

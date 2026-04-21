@@ -29,15 +29,14 @@
 
 外部エージェントによるコードレビュー結果を記録する。
 
-### CR-1: `generate_test_cases()` をエージェントモードに変更 ✅ 採用
+### ~~CR-1: `generate_test_cases()` をエージェントモードに変更~~ ✅ 対応済み（2026-04-21）
 
-- **指摘**: `generate_test_cases()` が `-p` モード（`_RUNNER_SCRIPT`）を使っており、ファイル一覧は渡しているが実際のファイル内容を読めないため的外れなテストケースが生成されるリスクがある
-- **対応**: `_RUNNER_SCRIPT_AGENT` に変更し Claude 自身に関連ファイルを読ませる（小さな変更で精度向上）
+- `_RUNNER_SCRIPT` → `_RUNNER_SCRIPT_AGENT` に変更。Claude 自身がリポジトリの関連ファイルを読んでからテストケースを生成するようになった
 
-### CR-2: `_detect_test_command()` の判定ロジック改善 ✅ 採用
+### ~~CR-2: `_detect_test_command()` の判定ロジック改善~~ ✅ 対応済み（2026-04-21）
 
-- **指摘**: `requirements.txt` が存在するだけで Python プロジェクトと判定されるが、Node.js プロジェクトに `requirements.txt` が混在することがある。`package.json` の存在を優先チェックする方が確実
-- **対応**: `package.json` チェックを Python チェックより先に行うよう判定順序を変更する
+- `package.json` チェックを Python チェックより先に行うよう判定順序を変更
+- `requirements.txt` の存在だけでは Python と判定しなくなった（`pyproject.toml` / `setup.py` を優先）
 
 ### CR-3: `generate_prompt()` のエージェントモードによる過剰権限 ❌ 不採用
 
