@@ -122,6 +122,9 @@ export default function TaskDetail() {
   const [editableTestCases, setEditableTestCases] = useState('')
   const [generatingTestCases, setGeneratingTestCases] = useState(false)
   const [runningTests, setRunningTests] = useState(false)
+  const [testResultSummary, setTestResultSummary] = useState<string | null>(null)
+  const [showRevisionInput, setShowRevisionInput] = useState(false)
+  const [revisionText, setRevisionText] = useState('')
   // The implementation prompt that was confirmed for execution (saved to pass into test flow)
   const [confirmedPrompt, setConfirmedPrompt] = useState('')
   // Resume / step navigation state
@@ -228,6 +231,7 @@ export default function TaskDetail() {
         }))
 
         // Auto-navigate to the most appropriate step
+        if (lastUnit?.summary) setTestResultSummary(lastUnit.summary)
         if (lastUnit?.passed) {
           setPromptState('reviewing')
           setSelectedStep('review')
@@ -677,6 +681,7 @@ export default function TaskDetail() {
           const runs = await getTestRuns(taskId)
           const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
           if (lastUnit) {
+            setTestResultSummary(lastUnit.summary ?? null)
             setSteps(prev => prev.map(s => {
               if (s.id === 'unit_test')  return {
                 ...s,
@@ -1257,6 +1262,51 @@ export default function TaskDetail() {
                   </p>
                 )}
 
+                {showRevisionInput && (
+                  <div style={{ marginBottom: '8px' }}>
+                    <textarea
+                      className="instruction-textarea"
+                      value={revisionText}
+                      onChange={e => setRevisionText(e.target.value)}
+                      placeholder="修正してほしい内容を入力してください..."
+                      style={{ minHeight: '80px', fontSize: '0.82rem' }}
+                      autoFocus
+                    />
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                      <button
+                        className="btn-primary"
+                        disabled={!revisionText.trim()}
+                        onClick={() => {
+                          const feedback = revisionText.trim()
+                          setRevisionText('')
+                          setShowRevisionInput(false)
+                          setGeneratedTestCases('')
+                          setEditableTestCases('')
+                          setGeneratingTestCases(true)
+                          generateTestCasesStream(
+                            taskId,
+                            confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + feedback,
+                            (chunk) => setGeneratedTestCases(prev => prev + chunk),
+                            () => { setGeneratingTestCases(false) },
+                            (err) => {
+                              setGeneratingTestCases(false)
+                              alert(`テストケース再生成エラー: ${err}`)
+                            }
+                          )
+                        }}
+                      >
+                        送信
+                      </button>
+                      <button
+                        className="btn-secondary"
+                        onClick={() => { setShowRevisionInput(false); setRevisionText('') }}
+                      >
+                        キャンセル
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="instruction-footer">
                   <button
                     className="btn-primary"
@@ -1267,24 +1317,7 @@ export default function TaskDetail() {
                   </button>
                   <button
                     className="btn-secondary"
-                    onClick={() => {
-                      // Re-generate test cases with user feedback
-                      const feedback = window.prompt('テストケースの修正内容を入力してください（Claudeに再生成を依頼します）:')
-                      if (feedback === null) return
-                      setGeneratedTestCases('')
-                      setEditableTestCases('')
-                      setGeneratingTestCases(true)
-                      generateTestCasesStream(
-                        taskId,
-                        confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + feedback,
-                        (chunk) => setGeneratedTestCases(prev => prev + chunk),
-                        () => setGeneratingTestCases(false),
-                        (err) => {
-                          setGeneratingTestCases(false)
-                          alert(`テストケース再生成エラー: ${err}`)
-                        }
-                      )
-                    }}
+                    onClick={() => { setShowRevisionInput(prev => !prev); setRevisionText('') }}
                     disabled={generatingTestCases || runningTests}
                   >
                     修正を依頼
@@ -1326,6 +1359,21 @@ export default function TaskDetail() {
                   <p style={{ margin: '0 0 4px', color: '#6366f1', fontSize: '0.75rem' }}>承認済みテストケース</p>
                   <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1', overflowY: 'auto', maxHeight: '200px' }}>{editableTestCases}</div>
                 </div>
+
+                {testResultSummary && (
+                  <div style={{
+                    background: testResultSummary.includes('failed') || testResultSummary.includes('失敗') ? '#450a0a' : '#052e16',
+                    border: `1px solid ${testResultSummary.includes('failed') || testResultSummary.includes('失敗') ? '#dc2626' : '#16a34a'}`,
+                    borderRadius: '6px',
+                    padding: '10px 14px',
+                    marginBottom: '8px',
+                    fontSize: '0.85rem',
+                    color: '#f1f5f9',
+                    fontWeight: 600,
+                  }}>
+                    {testResultSummary.includes('failed') || testResultSummary.includes('失敗') ? '❌' : '✅'} {testResultSummary}
+                  </div>
+                )}
 
                 <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0 0 8px' }}>
                   テスト結果と変更内容をログで確認してください。問題なければ「承認」、修正が必要なら「差し戻し」を選択してください。
