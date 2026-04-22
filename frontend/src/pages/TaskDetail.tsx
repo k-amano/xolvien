@@ -123,6 +123,7 @@ export default function TaskDetail() {
   const [generatingTestCases, setGeneratingTestCases] = useState(false)
   const [runningTests, setRunningTests] = useState(false)
   const [runningTestType, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
+  const [testPhaseLabel, setTestPhaseLabel] = useState<string | null>(null)
   const [testResultSummary, setTestResultSummary] = useState<string | null>(null)
   const [testPassed, setTestPassed] = useState<boolean | null>(null)
   const [showRevisionInput, setShowRevisionInput] = useState(false)
@@ -658,6 +659,7 @@ export default function TaskDetail() {
     if (!editableTestCases.trim() || runningTests) return
     setRunningTests(true)
     setRunningTestType('unit')
+    setTestPhaseLabel('テストコードを生成中')
     setPromptState('running_tests')
 
     streamKeyRef.current += 1
@@ -676,10 +678,19 @@ export default function TaskDetail() {
               : entry
           )
         )
+        if (chunk.includes('[TEST] テストを実行しています')) {
+          setTestPhaseLabel('テストを実行中')
+        } else if (chunk.includes('[TEST] 自動修正')) {
+          const m = chunk.match(/自動修正 \((\d+)\/(\d+)\)/)
+          setTestPhaseLabel(m ? `自動修正中 ${m[1]}/${m[2]}` : '自動修正中')
+        } else if (chunk.includes('[TEST] テストを再実行しています')) {
+          setTestPhaseLabel('テストを再実行中')
+        }
       },
       async () => {
         setRunningTests(false)
         setRunningTestType(null)
+        setTestPhaseLabel(null)
         setPromptState('reviewing')
         // Refresh step statuses from DB
         try {
@@ -703,6 +714,7 @@ export default function TaskDetail() {
       (err) => {
         setRunningTests(false)
         setRunningTestType(null)
+        setTestPhaseLabel(null)
         setPromptState('reviewing')
         setLogEntries(prev => [
           ...prev,
@@ -935,7 +947,7 @@ export default function TaskDetail() {
                   : generatingTestCases
                   ? 'テストケースを生成しています...'
                   : runningTests || task.status === 'testing'
-                  ? `${runningTestType === 'unit' ? '単体テスト' : runningTestType === 'integration' ? '結合テスト' : runningTestType === 'e2e' ? 'E2Eテスト' : 'テスト'}を実行しています...`
+                  ? `${runningTestType === 'unit' ? '単体テスト' : runningTestType === 'integration' ? '結合テスト' : runningTestType === 'e2e' ? 'E2Eテスト' : 'テスト'}: ${testPhaseLabel ?? 'テストコードを生成中'}`
                   : task.status === 'initializing'
                   ? 'コンテナを準備中... (30秒〜1分かかります)'
                   : '実行中... (完了まで1〜3分かかることがあります)'}
