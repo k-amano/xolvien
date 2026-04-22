@@ -122,7 +122,9 @@ export default function TaskDetail() {
   const [editableTestCases, setEditableTestCases] = useState('')
   const [generatingTestCases, setGeneratingTestCases] = useState(false)
   const [runningTests, setRunningTests] = useState(false)
+  const [runningTestType, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
   const [testResultSummary, setTestResultSummary] = useState<string | null>(null)
+  const [testPassed, setTestPassed] = useState<boolean | null>(null)
   const [showRevisionInput, setShowRevisionInput] = useState(false)
   const [revisionText, setRevisionText] = useState('')
   // The implementation prompt that was confirmed for execution (saved to pass into test flow)
@@ -232,6 +234,7 @@ export default function TaskDetail() {
 
         // Auto-navigate to the most appropriate step
         if (lastUnit?.summary) setTestResultSummary(lastUnit.summary)
+        if (lastUnit != null) setTestPassed(lastUnit.passed)
         if (lastUnit?.passed) {
           setPromptState('reviewing')
           setSelectedStep('review')
@@ -654,6 +657,7 @@ export default function TaskDetail() {
   async function handleApproveTestCases() {
     if (!editableTestCases.trim() || runningTests) return
     setRunningTests(true)
+    setRunningTestType('unit')
     setPromptState('running_tests')
 
     streamKeyRef.current += 1
@@ -675,6 +679,7 @@ export default function TaskDetail() {
       },
       async () => {
         setRunningTests(false)
+        setRunningTestType(null)
         setPromptState('reviewing')
         // Refresh step statuses from DB
         try {
@@ -682,6 +687,7 @@ export default function TaskDetail() {
           const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
           if (lastUnit) {
             setTestResultSummary(lastUnit.summary ?? null)
+            setTestPassed(lastUnit.passed)
             setSteps(prev => prev.map(s => {
               if (s.id === 'unit_test')  return {
                 ...s,
@@ -696,6 +702,7 @@ export default function TaskDetail() {
       },
       (err) => {
         setRunningTests(false)
+        setRunningTestType(null)
         setPromptState('reviewing')
         setLogEntries(prev => [
           ...prev,
@@ -928,7 +935,7 @@ export default function TaskDetail() {
                   : generatingTestCases
                   ? 'テストケースを生成しています...'
                   : runningTests || task.status === 'testing'
-                  ? 'テストを実行しています...'
+                  ? `${runningTestType === 'unit' ? '単体テスト' : runningTestType === 'integration' ? '結合テスト' : runningTestType === 'e2e' ? 'E2Eテスト' : 'テスト'}を実行しています...`
                   : task.status === 'initializing'
                   ? 'コンテナを準備中... (30秒〜1分かかります)'
                   : '実行中... (完了まで1〜3分かかることがあります)'}
@@ -1362,8 +1369,8 @@ export default function TaskDetail() {
 
                 {testResultSummary && (
                   <div style={{
-                    background: testResultSummary.includes('failed') || testResultSummary.includes('失敗') ? '#450a0a' : '#052e16',
-                    border: `1px solid ${testResultSummary.includes('failed') || testResultSummary.includes('失敗') ? '#dc2626' : '#16a34a'}`,
+                    background: testPassed === false ? '#450a0a' : '#052e16',
+                    border: `1px solid ${testPassed === false ? '#dc2626' : '#16a34a'}`,
                     borderRadius: '6px',
                     padding: '10px 14px',
                     marginBottom: '8px',
@@ -1371,7 +1378,7 @@ export default function TaskDetail() {
                     color: '#f1f5f9',
                     fontWeight: 600,
                   }}>
-                    {testResultSummary.includes('failed') || testResultSummary.includes('失敗') ? '❌' : '✅'} {testResultSummary}
+                    {testPassed === false ? '❌' : '✅'} {testResultSummary}
                   </div>
                 )}
 
