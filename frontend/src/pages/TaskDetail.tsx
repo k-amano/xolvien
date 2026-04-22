@@ -124,6 +124,7 @@ export default function TaskDetail() {
   const [runningTests, setRunningTests] = useState(false)
   const [runningTestType, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
   const [testPhaseLabel, setTestPhaseLabel] = useState<string | null>(null)
+  const testCountRef = useRef({ passed: 0, failed: 0 })
   const [testResultSummary, setTestResultSummary] = useState<string | null>(null)
   const [testPassed, setTestPassed] = useState<boolean | null>(null)
   const [showRevisionInput, setShowRevisionInput] = useState(false)
@@ -660,6 +661,7 @@ export default function TaskDetail() {
     setRunningTests(true)
     setRunningTestType('unit')
     setTestPhaseLabel('テストコードを生成中')
+    testCountRef.current = { passed: 0, failed: 0 }
     setPromptState('running_tests')
 
     streamKeyRef.current += 1
@@ -678,13 +680,41 @@ export default function TaskDetail() {
               : entry
           )
         )
-        if (chunk.includes('[TEST] テストを実行しています')) {
-          setTestPhaseLabel('テストを実行中')
+        if (chunk.includes('[TEST] テストを実行しています') || chunk.includes('[TEST] テストを再実行しています')) {
+          testCountRef.current = { passed: 0, failed: 0 }
+          setTestPhaseLabel('テストを実行中 (0件完了)')
         } else if (chunk.includes('[TEST] 自動修正')) {
           const m = chunk.match(/自動修正 \((\d+)\/(\d+)\)/)
           setTestPhaseLabel(m ? `自動修正中 ${m[1]}/${m[2]}` : '自動修正中')
-        } else if (chunk.includes('[TEST] テストを再実行しています')) {
-          setTestPhaseLabel('テストを再実行中')
+        } else {
+          // Count individual test results line by line
+          // pytest: "PASSED" / "FAILED" per line, or dots "." = pass "F" = fail
+          // Jest: "✓" = pass "✕" / "×" = fail
+          let updated = false
+          for (const line of chunk.split('\n')) {
+            if (/\bPASSED\b/.test(line) || /^\s*✓/.test(line) || /^\s*✔/.test(line)) {
+              testCountRef.current.passed += 1
+              updated = true
+            } else if (/\bFAILED\b/.test(line) || /^\s*✕/.test(line) || /^\s*✗/.test(line) || /^\s*×/.test(line)) {
+              testCountRef.current.failed += 1
+              updated = true
+            }
+            // pytest dot-style: a line of dots/F like "...F..F."
+            const dotMatch = line.match(/^[.F]+$/)
+            if (dotMatch) {
+              testCountRef.current.passed += (line.match(/\./g) ?? []).length
+              testCountRef.current.failed += (line.match(/F/g) ?? []).length
+              updated = true
+            }
+          }
+          if (updated) {
+            const { passed, failed } = testCountRef.current
+            const total = passed + failed
+            const label = failed > 0
+              ? `テストを実行中 (${total}件完了 / ${failed}件失敗)`
+              : `テストを実行中 (${total}件完了)`
+            setTestPhaseLabel(label)
+          }
         }
       },
       async () => {
