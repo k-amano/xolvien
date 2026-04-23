@@ -222,7 +222,7 @@ async def run_unit_tests_stream(
     async def generate():
         try:
             async for chunk in claude_service.run_unit_tests(
-                db, task_id, data.implementation_prompt, data.test_cases
+                db, task_id, data.implementation_prompt
             ):
                 yield chunk
         except ValueError as e:

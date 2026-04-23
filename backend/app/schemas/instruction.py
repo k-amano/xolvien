@@ -13,7 +13,6 @@ class GenerateTestCasesRequest(BaseModel):
 class RunUnitTestsRequest(BaseModel):
     """Request schema for running unit tests."""
     implementation_prompt: str
-    test_cases: str
 
 
 class GeneratePromptRequest(BaseModel):

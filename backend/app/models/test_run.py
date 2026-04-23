@@ -41,3 +41,4 @@ class TestRun(Base):
 
     # Relationships
     task = relationship("Task", back_populates="test_runs")
+    test_case_results = relationship("TestCaseResult", back_populates="test_run", cascade="all, delete-orphan")

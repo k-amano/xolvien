@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Repository, Task, TaskLog, TestRun, Instruction } from '../types'
+import type { Repository, Task, TaskLog, TestRun, Instruction, TestCaseItem } from '../types'
 
 const AUTH_TOKEN = 'dev-token-12345'
 
@@ -93,6 +93,11 @@ export async function gitPushStream(
 
 export async function getTestRuns(taskId: number): Promise<TestRun[]> {
   const res = await apiClient.get<TestRun[]>(`/api/v1/tasks/${taskId}/test-runs`)
+  return res.data
+}
+
+export async function getTestCaseItems(taskId: number): Promise<TestCaseItem[]> {
+  const res = await apiClient.get<TestCaseItem[]>(`/api/v1/tasks/${taskId}/test-cases`)
   return res.data
 }
 
@@ -256,7 +261,6 @@ export async function generateTestCasesStream(
 export async function runUnitTestsStream(
   taskId: number,
   implementationPrompt: string,
-  testCases: string,
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (err: string) => void
@@ -270,7 +274,7 @@ export async function runUnitTestsStream(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${AUTH_TOKEN}`,
         },
-        body: JSON.stringify({ implementation_prompt: implementationPrompt, test_cases: testCases }),
+        body: JSON.stringify({ implementation_prompt: implementationPrompt }),
       }
     )
 

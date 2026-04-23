@@ -50,4 +50,5 @@ class Task(Base):
     owner = relationship("User", backref="tasks")
     instructions = relationship("Instruction", back_populates="task", cascade="all, delete-orphan")
     test_runs = relationship("TestRun", back_populates="task", cascade="all, delete-orphan")
+    test_case_items = relationship("TestCaseItem", back_populates="task", cascade="all, delete-orphan")
     logs = relationship("TaskLog", back_populates="task", cascade="all, delete-orphan")

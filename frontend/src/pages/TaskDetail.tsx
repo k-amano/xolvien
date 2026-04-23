@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream, getTestRuns, getLastCompletedInstruction } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
+import type { TestCaseItem } from '../types'
 
 type PromptState = 'idle' | 'clarifying' | 'generating' | 'confirming' | 'test_cases' | 'running_tests' | 'reviewing'
 
@@ -96,48 +97,6 @@ type LogEntry =
   | { kind: 'log'; data: TaskLog }
   | { kind: 'stream'; text: string; key: string }
 
-interface TestResultRow {
-  name: string
-  status: 'PASSED' | 'FAILED' | 'ERROR' | 'SKIPPED'
-  executedAt: string
-}
-
-function parseTestResultsTable(output: string, executedAt: string): TestResultRow[] {
-  const rows: TestResultRow[] = []
-  for (const line of output.split('\n')) {
-    // pytest verbose: "tests/test_foo.py::test_bar PASSED"
-    let m = line.match(/^\s*([\w/.::\[\]-]+)\s+(PASSED|FAILED|ERROR|SKIPPED)\s*$/)
-    if (m) {
-      rows.push({ name: m[1], status: m[2] as TestResultRow['status'], executedAt })
-      continue
-    }
-    // pytest short: "FAILED tests/test_foo.py::test_bar"
-    m = line.match(/^(FAILED|PASSED|ERROR)\s+([\w/.::\[\]-]+)/)
-    if (m) {
-      rows.push({ name: m[2], status: m[1] as TestResultRow['status'], executedAt })
-      continue
-    }
-    // Jest: "  ✓ test name (12 ms)"
-    m = line.match(/^\s+[✓✔]\s+(.+?)(?:\s+\(\d+\s*m?s\))?\s*$/)
-    if (m) {
-      rows.push({ name: m[1].trim(), status: 'PASSED', executedAt })
-      continue
-    }
-    // Jest: "  ✕ test name"
-    m = line.match(/^\s+[✕✗×]\s+(.+?)\s*$/)
-    if (m) {
-      rows.push({ name: m[1].trim(), status: 'FAILED', executedAt })
-    }
-  }
-  return rows
-}
-
-const STATUS_ICON: Record<string, string> = {
-  PASSED: '✅',
-  FAILED: '❌',
-  ERROR: '⚠️',
-  SKIPPED: '⏭️',
-}
 
 export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
@@ -170,7 +129,7 @@ export default function TaskDetail() {
   const testCountRef = useRef({ passed: 0, failed: 0 })
   const [testResultSummary, setTestResultSummary] = useState<string | null>(null)
   const [testPassed, setTestPassed] = useState<boolean | null>(null)
-  const [testRunOutput, setTestRunOutput] = useState<string | null>(null)
+  const [testCaseItems, setTestCaseItems] = useState<TestCaseItem[]>([])
   const [showRevisionInput, setShowRevisionInput] = useState(false)
   const [revisionText, setRevisionText] = useState('')
   // The implementation prompt that was confirmed for execution (saved to pass into test flow)
@@ -237,10 +196,12 @@ export default function TaskDetail() {
 
     async function checkResume() {
       try {
-        const [runs, lastInstruction] = await Promise.all([
+        const [runs, lastInstruction, items] = await Promise.all([
           getTestRuns(taskId),
           getLastCompletedInstruction(taskId),
+          getTestCaseItems(taskId),
         ])
+        if (items.length > 0) setTestCaseItems(items)
 
         const hasImpl = !!lastInstruction
         const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
@@ -281,7 +242,6 @@ export default function TaskDetail() {
         // Auto-navigate to the most appropriate step
         if (lastUnit?.summary) setTestResultSummary(lastUnit.summary)
         if (lastUnit != null) setTestPassed(lastUnit.passed)
-        if (lastUnit?.output) setTestRunOutput(lastUnit.output)
         if (lastUnit?.passed) {
           setPromptState('reviewing')
           setSelectedStep('review')
@@ -667,7 +627,13 @@ export default function TaskDetail() {
       taskId,
       prompt,
       (chunk) => setGeneratedTestCases(prev => prev + chunk),
-      () => setGeneratingTestCases(false),
+      async () => {
+        setGeneratingTestCases(false)
+        try {
+          const items = await getTestCaseItems(taskId)
+          setTestCaseItems(items)
+        } catch { /* ignore */ }
+      },
       (err) => {
         setGeneratingTestCases(false)
         setLogEntries(prev => [
@@ -702,7 +668,7 @@ export default function TaskDetail() {
   }
 
   async function handleApproveTestCases() {
-    if (!editableTestCases.trim() || runningTests) return
+    if (testCaseItems.length === 0 || runningTests) return
     setRunningTests(true)
     setRunningTestType('unit')
     setTestPhaseLabel('テストコードを生成中')
@@ -716,7 +682,6 @@ export default function TaskDetail() {
     await runUnitTestsStream(
       taskId,
       confirmedPrompt,
-      editableTestCases,
       (chunk) => {
         setLogEntries(prev =>
           prev.map(entry =>
@@ -769,12 +734,15 @@ export default function TaskDetail() {
         setPromptState('reviewing')
         // Refresh step statuses from DB
         try {
-          const runs = await getTestRuns(taskId)
+          const [runs, items] = await Promise.all([
+            getTestRuns(taskId),
+            getTestCaseItems(taskId),
+          ])
+          setTestCaseItems(items)
           const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
           if (lastUnit) {
             setTestResultSummary(lastUnit.summary ?? null)
             setTestPassed(lastUnit.passed)
-            setTestRunOutput(lastUnit.output ?? null)
             setSteps(prev => prev.map(s => {
               if (s.id === 'unit_test')  return {
                 ...s,
@@ -1340,20 +1308,40 @@ export default function TaskDetail() {
                   }}>
                     {generatedTestCases || 'テストケースを生成中...'}
                   </div>
+                ) : testCaseItems.length > 0 ? (
+                  <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+                    <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.78rem' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #334155', background: '#0f172a' }}>
+                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>ID</th>
+                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>対象画面</th>
+                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>テスト項目</th>
+                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>操作（入力値）</th>
+                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>期待出力</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {testCaseItems.map((tc) => (
+                          <tr key={tc.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                            <td style={{ padding: '5px 8px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
+                            <td style={{ padding: '5px 8px', color: '#94a3b8', whiteSpace: 'nowrap' }}>{tc.target_screen ?? '—'}</td>
+                            <td style={{ padding: '5px 8px', color: '#cbd5e1' }}>{tc.test_item}</td>
+                            <td style={{ padding: '5px 8px', color: '#94a3b8', fontSize: '0.75rem' }}>{tc.operation ?? '—'}</td>
+                            <td style={{ padding: '5px 8px', color: '#94a3b8', fontSize: '0.75rem' }}>{tc.expected_output ?? '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 ) : (
-                  <textarea
-                    className="instruction-textarea"
-                    value={editableTestCases}
-                    onChange={e => setEditableTestCases(e.target.value)}
-                    placeholder="テストケース一覧..."
-                    style={{ flex: 1, minHeight: '200px', fontFamily: 'monospace', fontSize: '0.82rem' }}
-                    disabled={runningTests}
-                  />
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#475569', fontSize: '0.85rem' }}>
+                    テストケースがまだ生成されていません
+                  </div>
                 )}
 
-                {!generatingTestCases && !runningTests && (
+                {!generatingTestCases && !runningTests && testCaseItems.length > 0 && (
                   <p style={{ fontSize: '0.75rem', color: '#64748b', margin: '0 0 6px', flexShrink: 0 }}>
-                    テストケースを直接編集できます。修正後に承認してください。
+                    {testCaseItems.length} 件のテストケースが生成されました。承認するとテストコードを生成・実行します。
                   </p>
                 )}
 
@@ -1382,7 +1370,13 @@ export default function TaskDetail() {
                             taskId,
                             confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + feedback,
                             (chunk) => setGeneratedTestCases(prev => prev + chunk),
-                            () => { setGeneratingTestCases(false) },
+                            async () => {
+                              setGeneratingTestCases(false)
+                              try {
+                                const items = await getTestCaseItems(taskId)
+                                setTestCaseItems(items)
+                              } catch { /* ignore */ }
+                            },
                             (err) => {
                               setGeneratingTestCases(false)
                               alert(`テストケース再生成エラー: ${err}`)
@@ -1406,7 +1400,7 @@ export default function TaskDetail() {
                   <button
                     className="btn-primary"
                     onClick={handleApproveTestCases}
-                    disabled={generatingTestCases || runningTests || !editableTestCases.trim()}
+                    disabled={generatingTestCases || runningTests || testCaseItems.length === 0}
                   >
                     {runningTests ? 'テスト実行中...' : '承認してテスト実行'}
                   </button>
@@ -1470,41 +1464,50 @@ export default function TaskDetail() {
                   </div>
                 )}
 
-                {testRunOutput && (() => {
-                  const executedAt = new Date().toLocaleString('ja-JP', { hour12: false })
-                  const rows = parseTestResultsTable(testRunOutput, executedAt)
-                  if (rows.length === 0) return null
-                  return (
-                    <div style={{
-                      background: '#0f172a',
-                      border: '1px solid #334155',
-                      borderRadius: '6px',
-                      padding: '10px 12px',
-                      marginBottom: '8px',
-                      overflowX: 'auto',
-                    }}>
-                      <p style={{ margin: '0 0 6px', color: '#6366f1', fontSize: '0.75rem' }}>テスト結果集計表</p>
-                      <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.78rem' }}>
-                        <thead>
-                          <tr style={{ borderBottom: '1px solid #334155' }}>
-                            <th style={{ textAlign: 'left', padding: '4px 8px', color: '#94a3b8', fontWeight: 500 }}>テスト名</th>
-                            <th style={{ textAlign: 'center', padding: '4px 8px', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>結果</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rows.map((row, i) => (
-                            <tr key={i} style={{ borderBottom: '1px solid #1e293b' }}>
-                              <td style={{ padding: '3px 8px', color: '#cbd5e1', fontFamily: 'monospace', wordBreak: 'break-all' }}>{row.name}</td>
-                              <td style={{ padding: '3px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
-                                {STATUS_ICON[row.status] ?? row.status} {row.status}
-                              </td>
+                {testCaseItems.length > 0 && (
+                  <div style={{
+                    background: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '10px 12px',
+                    marginBottom: '8px',
+                    overflowX: 'auto',
+                    flex: 1,
+                    minHeight: 0,
+                  }}>
+                    <p style={{ margin: '0 0 6px', color: '#6366f1', fontSize: '0.75rem' }}>テスト結果集計表</p>
+                    <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
+                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>ID</th>
+                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>テスト項目</th>
+                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>期待出力</th>
+                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>実際の出力</th>
+                          <th style={{ padding: '4px 6px', textAlign: 'center', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>判定</th>
+                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>実行日時</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {testCaseItems.map((tc) => {
+                          const r = tc.latest_result
+                          const verdictIcon: Record<string, string> = { PASSED: '✅', FAILED: '❌', ERROR: '⚠️', SKIPPED: '⏭️' }
+                          const icon = r?.verdict ? (verdictIcon[r.verdict] ?? r.verdict) : '—'
+                          const executedAt = r ? new Date(r.executed_at).toLocaleString('ja-JP', { hour12: false }) : '—'
+                          return (
+                            <tr key={tc.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                              <td style={{ padding: '4px 6px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
+                              <td style={{ padding: '4px 6px', color: '#cbd5e1' }}>{tc.test_item}</td>
+                              <td style={{ padding: '4px 6px', color: '#94a3b8', fontSize: '0.72rem' }}>{tc.expected_output ?? '—'}</td>
+                              <td style={{ padding: '4px 6px', color: '#94a3b8', fontSize: '0.72rem' }}>{r?.actual_output ?? '—'}</td>
+                              <td style={{ padding: '4px 6px', textAlign: 'center', whiteSpace: 'nowrap' }}>{icon} {r?.verdict ?? '未実行'}</td>
+                              <td style={{ padding: '4px 6px', color: '#64748b', whiteSpace: 'nowrap' }}>{executedAt}</td>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )
-                })()}
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
 
                 <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0 0 8px' }}>
                   テスト結果と変更内容をログで確認してください。問題なければ「承認」、修正が必要なら「差し戻し」を選択してください。

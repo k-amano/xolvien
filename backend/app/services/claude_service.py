@@ -12,6 +12,8 @@ from app.models.task import Task, TaskStatus
 from app.models.instruction import Instruction, InstructionStatus
 from app.models.test_run import TestRun, TestType
 from app.models.task_log import TaskLog, LogLevel, LogSource
+from app.models.test_case_item import TestCaseItem
+from app.models.test_case_result import TestCaseResult, Verdict
 from app.services.docker_service import get_docker_service
 
 # Python script for text-only generation (prompt generation)
@@ -435,8 +437,8 @@ README:
         implementation_prompt: str,
     ) -> AsyncGenerator[str, None]:
         """
-        Generate test case list (not code) for a given implementation prompt.
-        Streams Markdown text listing test cases (normal / error / edge cases).
+        Generate structured test cases (JSON) from an implementation prompt.
+        Saves results to test_case_items table, streams progress to caller.
         """
         result = await db.execute(sa_select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
@@ -451,7 +453,7 @@ README:
             "/workspace",
         )
 
-        prompt = f"""あなたはテスト設計の専門家です。以下の実装プロンプトに基づいて、単体テストのテストケース一覧を生成してください。
+        prompt = f"""あなたはテスト設計の専門家です。以下の実装プロンプトとプロジェクトのファイル一覧を参考にして、単体テストのテストケース一覧を生成してください。
 
 ## 実装予定の内容
 {implementation_prompt}
@@ -459,35 +461,81 @@ README:
 ## プロジェクトのファイル一覧
 {file_list.strip()}
 
-## 出力形式
-以下のMarkdown形式でテストケース一覧を出力してください。テストコードは生成しないでください。
+## 出力形式（必ずこの形式のみを出力すること）
 
+```json
+[
+  {{
+    "seq_no": 1,
+    "target_screen": "対象画面名（画面がない場合はモジュール名）",
+    "test_item": "テスト項目の名称",
+    "operation": "具体的な入力値を含む操作手順（例: 入力欄に \\"sk-test-12345\\" を入力して送信ボタンを押す）",
+    "expected_output": "期待される具体的な出力値（例: localStorage[\\"apiKey\\"] が \\"sk-test-12345\\" になっている）",
+    "function_name": "test_tc001_短い説明（英数字とアンダースコアのみ）"
+  }}
+]
 ```
-## テストケース一覧
 
-### 正常系
-- [ ] テストケース名: 説明
-
-### 異常系
-- [ ] テストケース名: 説明
-
-### 境界値
-- [ ] テストケース名: 説明（該当する場合のみ）
-```
-
-テストケースの粒度は「機能単位」とし、正常系・異常系・境界値を網羅してください。
-テストコードや実装の詳細は含めず、テストケース名と説明のみを出力してください。
+## 注意事項
+- 正常系・異常系・境界値を網羅し、各テストケースに具体的な入力値と期待出力値を必ず記述すること
+- function_name は `test_tc{seq_no:03d}_` で始まる英数字・アンダースコアのみの関数名にすること
+- JSON以外のテキスト（説明文・Markdownの見出し等）は出力しないこと
+- テストコードは生成しないこと（テストケース定義のみ）
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", prompt)
         self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
 
+        raw_output = ""
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
             "python3 /tmp/xolvien_runner.py",
             "/workspace/repo",
         ):
             yield chunk
+            raw_output += chunk
+
+        # Parse JSON and save to test_case_items
+        yield "\n[TEST] テストケースをDBに保存しています...\n"
+        try:
+            items = self._parse_test_cases_json(raw_output)
+            if not items:
+                yield "[TEST] ⚠️ テストケースのJSON解析に失敗しました。出力を確認してください。\n"
+                return
+
+            # Delete previous test_case_items for this task (regeneration)
+            existing = await db.execute(sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id))
+            for item in existing.scalars().all():
+                await db.delete(item)
+            await db.commit()
+
+            for item_data in items:
+                tc = TestCaseItem(
+                    task_id=task_id,
+                    seq_no=item_data["seq_no"],
+                    target_screen=item_data.get("target_screen"),
+                    test_item=item_data["test_item"],
+                    operation=item_data.get("operation"),
+                    expected_output=item_data.get("expected_output"),
+                    function_name=item_data.get("function_name"),
+                )
+                db.add(tc)
+            await db.commit()
+            yield f"[TEST] ✅ {len(items)} 件のテストケースを保存しました\n"
+        except Exception as e:
+            yield f"[TEST] ⚠️ テストケース保存エラー: {e}\n"
+
+    def _parse_test_cases_json(self, raw: str) -> list[dict]:
+        """Extract and parse the JSON array from Claude's output."""
+        # Find the first '[' and last ']' to extract the JSON array
+        start = raw.find('[')
+        end = raw.rfind(']')
+        if start == -1 or end == -1 or end <= start:
+            return []
+        try:
+            return json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            return []
 
     def _detect_test_command(self, container_id: str) -> str | None:
         """
@@ -546,11 +594,10 @@ README:
         db: AsyncSession,
         task_id: int,
         implementation_prompt: str,
-        test_cases: str,
     ) -> AsyncGenerator[str, None]:
         """
-        Generate test code from approved test cases, run tests, auto-fix up to 3 times.
-        Streams progress logs. Saves TestRun record on completion.
+        Generate test code from approved test_case_items, run tests, auto-fix up to 3 times.
+        Saves TestRun and TestCaseResult records. Streams progress logs.
         """
         result = await db.execute(sa_select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
@@ -559,14 +606,22 @@ README:
         if not task.container_id:
             raise ValueError("Task has no container")
 
+        # Load approved test case items from DB
+        tc_result = await db.execute(
+            sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id).order_by(TestCaseItem.seq_no)
+        )
+        tc_items = tc_result.scalars().all()
+        if not tc_items:
+            yield "[TEST] ⚠️ テストケースが登録されていません。先にテストケースを生成・承認してください。\n"
+            return
+
         task.status = TaskStatus.TESTING
         await db.commit()
 
-        # Create TestRun record (test_command determined after code gen)
+        # Create TestRun record
         test_run = TestRun(
             task_id=task_id,
             test_type=TestType.UNIT,
-            test_cases=test_cases,
             started_at=datetime.utcnow(),
         )
         db.add(test_run)
@@ -575,7 +630,14 @@ README:
 
         yield "[TEST] テストコードを生成しています...\n"
 
-        # Step 1: Generate test code — Claude also installs deps and runs tests itself
+        # Build test case summary for Claude
+        tc_summary_lines = []
+        for tc in tc_items:
+            tc_summary_lines.append(
+                f"- {tc.tc_id} | {tc.test_item} | 操作: {tc.operation} | 期待出力: {tc.expected_output} | function: {tc.function_name}"
+            )
+        tc_summary = "\n".join(tc_summary_lines)
+
         _, file_list, _ = self.docker_service.execute_command(
             task.container_id,
             "find /workspace/repo -type f | grep -v '.git' | grep -v '__pycache__' | grep -v 'node_modules' 2>/dev/null",
@@ -588,41 +650,41 @@ README:
 {implementation_prompt}
 
 ## 承認済みテストケース一覧
-{test_cases}
+各テストケースの function_name で関数を生成し、操作と期待出力に基づいてテストコードを書いてください。
+
+{tc_summary}
 
 ## プロジェクトのファイル一覧
 {file_list.strip()}
 
 ## 実行手順（順番通りに行うこと）
 
-1. `package.json` や `pyproject.toml`、`requirements*.txt` を読み込み、プロジェクトのテストフレームワーク（Jest, pytest 等）を特定してください
-2. 既存のテストファイルがあれば確認して、命名規則や構造に従ってください
-3. 承認済みテストケース一覧の全ケースをカバーするテストコードを生成し、適切な場所に書き込んでください
-4. テストの実行に必要な依存パッケージをインストールしてください（例: `npm install`, `pip install pytest` 等）
-5. テストを実行してください（例: `npm test -- --watchAll=false`, `python -m pytest -v` 等）
-6. テスト実行結果（パス数、失敗数、エラー内容）を出力してください
+1. `package.json` や `pyproject.toml`、`requirements*.txt` を読み込み、テストフレームワーク（Jest, pytest 等）を特定してください
+2. 既存のテストファイルがあれば確認し、命名規則・構造に従ってください
+3. テストケース一覧の全ケースについて、指定された function_name で関数を生成してください
+   - 各テスト関数は操作（入力値）を実行し、期待出力と実際の出力を必ず print で出力すること
+   - 例: `print(f"期待: sk-test-12345, 実際: {{actual}}")`
+4. テストの実行に必要な依存パッケージをインストールしてください
+5. テストを実行してください
+6. テスト実行結果を出力してください
 
 注意:
-- テストコードの生成・書き込み・依存インストール・テスト実行をすべて行ってください
-- 依存パッケージが不足している場合は必ずインストールしてから実行してください
-- テスト結果の出力は必ず含めてください
+- function_name は変更しないこと（DBでの結果照合に使用する）
+- 各テスト関数で実際の出力値を print すること（実際の出力値のDB保存に使用する）
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", gen_prompt)
         self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
 
-        claude_output = ""
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
             "python3 /tmp/xolvien_runner.py",
             "/workspace/repo",
         ):
             yield chunk
-            claude_output += chunk
 
-        # Step 2: Detect test command from project structure (after Claude may have installed deps)
+        # Detect test command
         test_command = self._detect_test_command(task.container_id)
-
         if test_command is None:
             yield "\n[TEST] テストフレームワークが見つかりません。テストコードを確認してください。\n"
             test_run.passed = False
@@ -655,7 +717,7 @@ README:
 {implementation_prompt}
 
 ## テストケース一覧
-{test_cases}
+{tc_summary}
 
 ## テストコマンド
 {test_command}
@@ -668,9 +730,9 @@ README:
 
 ## 指示
 1. 失敗の原因を特定してください（テストコードの問題か、実装コードの問題か）
-2. 原因を修正してください
+2. 原因を修正してください（function_name は変更しないこと）
 3. 依存パッケージが不足している場合はインストールしてください
-4. テストを再実行して結果を出力してください（`{test_command}` を必ず実行すること）
+4. テストを再実行してください（`{test_command}` を必ず実行すること）
 """
                 self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", fix_prompt)
                 self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
@@ -692,7 +754,6 @@ README:
             last_output = output
             last_error = error
 
-            # Always show test output
             combined = (output + "\n" + error).strip()
             if combined:
                 yield combined + "\n"
@@ -713,6 +774,21 @@ README:
                 else:
                     yield f"\n[TEST] 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
 
+        # Save TestCaseResults by matching function_name in test output
+        executed_at = datetime.utcnow()
+        for tc in tc_items:
+            verdict, actual = self._extract_result_for_function(last_output, tc.function_name)
+            tcr = TestCaseResult(
+                test_case_item_id=tc.id,
+                test_run_id=test_run.id,
+                actual_output=actual,
+                verdict=verdict,
+                executed_at=executed_at,
+            )
+            db.add(tcr)
+        await db.commit()
+        yield f"[TEST] テスト結果を {len(tc_items)} 件保存しました\n"
+
         # Save test report
         from app.services.test_service import get_test_service
         test_service = get_test_service()
@@ -720,17 +796,39 @@ README:
         test_run.summary = summary
 
         now_str = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        executed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        executed_at_str = executed_at.strftime("%Y-%m-%d %H:%M:%S UTC")
         report_filename = f"test-report-{now_str}-unit.md"
         report_path = f"/workspace/repo/test-reports/{report_filename}"
 
-        results_table = test_service.parse_test_results_table(last_output, executed_at)
+        # Build results table from DB records
+        tc_result2 = await db.execute(
+            sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id).order_by(TestCaseItem.seq_no)
+        )
+        tc_items2 = tc_result2.scalars().all()
+        report_rows = ["| TC-ID | テスト項目 | 期待出力 | 実際の出力 | 判定 | 実行日時 |",
+                       "|---|---|---|---|---|---|"]
+        verdict_icon = {Verdict.PASSED: "✅", Verdict.FAILED: "❌", Verdict.ERROR: "⚠️", Verdict.SKIPPED: "⏭️"}
+        for tc in tc_items2:
+            # Get latest result for this run
+            r_res = await db.execute(
+                sa_select(TestCaseResult)
+                .where(TestCaseResult.test_case_item_id == tc.id)
+                .where(TestCaseResult.test_run_id == test_run.id)
+            )
+            r = r_res.scalar_one_or_none()
+            icon = verdict_icon.get(r.verdict, "—") if r and r.verdict else "—"
+            verdict_str = r.verdict.value if r and r.verdict else "未実行"
+            actual = (r.actual_output or "—") if r else "—"
+            report_rows.append(
+                f"| {tc.tc_id} | {tc.test_item} | {tc.expected_output or '—'} | {actual} | {icon} {verdict_str} | {executed_at_str} |"
+            )
+        results_table_md = "\n".join(report_rows)
 
         report_content = f"""# テストレポート（単体テスト）
 
 | 項目 | 値 |
 |---|---|
-| 実行日時 | {executed_at} |
+| 実行日時 | {executed_at_str} |
 | テストコマンド | `{test_command}` |
 | 結果 | {"✅ PASS" if passed else "❌ FAIL"} |
 | リトライ回数 | {test_run.retry_count} |
@@ -738,11 +836,7 @@ README:
 
 ## テスト結果集計表
 
-{results_table if results_table else "_テストランナーの出力から個別結果を取得できませんでした。_"}
-
-## テストケース一覧（承認済み）
-
-{test_cases}
+{results_table_md}
 
 ## テスト実行ログ
 
@@ -778,6 +872,44 @@ README:
 
         yield f"\n[TEST] レポートを保存しました: {report_path}\n"
         yield f"\n[SYSTEM] テスト完了: {summary}\n"
+
+    def _extract_result_for_function(
+        self, output: str, function_name: str | None
+    ) -> tuple[Verdict | None, str | None]:
+        """
+        Scan test output for a specific function_name and return (verdict, actual_output).
+        Supports pytest verbose output and collects any print lines adjacent to the test result.
+        """
+        if not function_name:
+            return None, None
+
+        lines = output.splitlines()
+        verdict: Verdict | None = None
+        actual_lines: list[str] = []
+        capture = False
+
+        for i, line in enumerate(lines):
+            # pytest verbose: "tests/test_foo.py::test_tc001_xxx PASSED"
+            if function_name in line:
+                if "PASSED" in line:
+                    verdict = Verdict.PASSED
+                elif "FAILED" in line or "ERROR" in line:
+                    verdict = Verdict.FAILED if "FAILED" in line else Verdict.ERROR
+                elif "SKIPPED" in line:
+                    verdict = Verdict.SKIPPED
+                capture = True
+                continue
+
+            # Collect print output lines that appear immediately after the function match
+            if capture:
+                stripped = line.strip()
+                if stripped.startswith("期待:") or stripped.startswith("実際:") or stripped.startswith("PASSED") or stripped.startswith("FAILED"):
+                    actual_lines.append(stripped)
+                elif stripped == "" or stripped.startswith("PASSED") or stripped.startswith("tests/"):
+                    capture = False
+
+        actual = "\n".join(actual_lines) if actual_lines else None
+        return verdict, actual
 
 
 # Singleton instance

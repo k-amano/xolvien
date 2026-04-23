@@ -67,6 +67,31 @@ export interface TestRun {
   completed_at: string | null
 }
 
+export type Verdict = 'PASSED' | 'FAILED' | 'ERROR' | 'SKIPPED'
+
+export interface TestCaseResult {
+  id: number
+  test_case_item_id: number
+  test_run_id: number
+  actual_output: string | null
+  verdict: Verdict | null
+  executed_at: string
+}
+
+export interface TestCaseItem {
+  id: number
+  task_id: number
+  seq_no: number
+  tc_id: string
+  target_screen: string | null
+  test_item: string
+  operation: string | null
+  expected_output: string | null
+  function_name: string | null
+  created_at: string
+  latest_result: TestCaseResult | null
+}
+
 export interface Instruction {
   id: number
   task_id: number
