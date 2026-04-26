@@ -1,6 +1,6 @@
 # Xolvien — 現行仕様
 
-**最終更新**: 2026-04-21
+**最終更新**: 2026-04-26
 
 本書は現時点で実装済みの仕様を記録する。未実装の将来機能は `roadmap.md` に記載する。
 
@@ -224,26 +224,37 @@ WS  /api/v1/ws/tasks/{id}/status  ← WebSocket
 | タスク作成モーダル | リポジトリ選択（既存 / 新規登録）、タイトル・ブランチ名入力 |
 | タスク詳細画面 | 左右分割ペイン（ログエリア / 操作パネル）、リサイズ可能 |
 
-### 5.2 操作パネルのステート遷移（PromptState）
+### 5.2 操作パネルの設計（ChatEntry 追記型）
+
+`PromptState` による画面切り替え方式を廃止し、`ChatEntry` union type による追記のみのチャット履歴に刷新。すべてのフェーズ（要件確認・プロンプト生成・実装・テストケース・テスト結果・実装確認・エラー・システム通知）がカードとして永続的にチャット欄に蓄積される。
 
 ```
-idle
-  ↓「要件を確認する」
-clarifying（要件確認 Q&A）
-  ↓ 十分な情報が揃ったら自動移行、またはスキップ
-generating（プロンプト生成中）
-  ↓
-confirming（プロンプト確認・承認）
-  ↓「確定して実行」
-  ↓ 実行完了後に自動移行
-test_cases（テストケース確認）
-  ↓「承認してテスト実行」
-running_tests（テスト実行中）
-  ↓ 完了後に自動移行
-reviewing（実装確認）
-  ↓「承認」→ idle
-  ↓「差し戻し」→ idle（前回指示を入力欄に復元）
+ChatEntry =
+  | user_instruction      ← ユーザーの指示
+  | clarify_question      ← Claudeの質問
+  | clarify_answer        ← ユーザーの回答
+  | clarify_streaming     ← ストリーミング中
+  | prompt_generating     ← プロンプト生成中
+  | prompt_generated      ← 生成されたプロンプト（confirmed フラグ付き）
+  | implementation_running
+  | implementation_done
+  | test_cases_generating
+  | test_cases_ready      ← テストケース一覧（approved フラグ付き）
+  | test_running
+  | test_done             ← テスト結果サマリー
+  | review                ← 実装確認（resolved フラグ付き）
+  | error
+  | info                  ← システム通知
 ```
+
+入力エリア下部のボタンは `selectedStep`（ステップバーの選択）に応じて切り替わる：
+
+| selectedStep | テキストエリア | ボタン |
+|---|---|---|
+| implement（または未選択） | 有効（指示入力） | 要件を確認する / スキップしてプロンプトを生成 |
+| implement（未確定プロンプトあり） | 有効（フィードバック入力） | 確定して実行 / 再生成 |
+| unit_test | disabled | テストケースを生成 / 承認してテスト実行 / 修正を依頼 / テストを再実行 / テストケースを再生成 |
+| review | disabled | 承認 / 差し戻し |
 
 ### 5.3 ステップバー
 
@@ -258,15 +269,19 @@ reviewing（実装確認）
 | グレー | 未実施 |
 | グレー斜体（\*付き） | 未実装の将来ステップ |
 
-### 5.4 テストケース確認パネルの操作
+### 5.4 テストケース確認カードの操作
 
-- テキストエリアで直接編集して承認できる
+- チャット履歴内のテストケースカードで TC-ID・対象画面・テスト項目・操作・期待出力を確認
+- 入力エリア下部の「承認してテスト実行」でテストを開始
 - 「修正を依頼」クリックでインライン入力欄が展開される。修正内容を入力して「送信」するとテストケースを再生成
+- テスト完了後は「テストを再実行」「テストケースを再生成」の両方が選択可能
 
-### 5.5 実装確認パネルの表示
+### 5.5 テスト結果の表示
 
-- テスト結果サマリー（例：「19 passed, 0 failed」）をバナーで表示。成功時は緑、失敗時は赤
-- テスト結果集計表をインライン表示。pytest / Jest 出力を解析し、テスト名・結果（✅/❌/⚠️/⏭️）を行ごとに列挙。ページリロード後も DB から復元して表示
+- テスト結果サマリーはテストケース（TC-xxx）の件数ベースで表示（例：「45 passed, 5 failed」）
+- テスト結果集計表：TC-ID / テスト項目 / 期待出力 / 実際の出力 / 判定 / 実行日時
+- 実際の出力は各テスト関数が `console.log('XOLVIEN_RESULT:{...}')` で出力した値をバックエンドが収集（PASSED・FAILED 両方で記録）
+- ページリロード後も DB の `test_case_results` から復元して表示
 
 ---
 
@@ -298,8 +313,9 @@ backend/app/
 | `clarify_requirements()` | 要件確認 Q&A。不明点を質問、十分な情報が揃ったら終了 |
 | `generate_prompt()` | 簡潔な指示を最適化されたプロンプトに変換 |
 | `generate_test_cases()` | 実装プロンプトからテストケース一覧（Markdown）を生成。エージェントモードでリポジトリの関連ファイルを読んで生成 |
-| `run_unit_tests()` | テストコード生成 → 実行 → 自動修正ループ（最大3回） |
+| `run_unit_tests()` | テストコード生成 → 実行 → 自動修正ループ（最大3回）。EACCES 等のインフラエラーは即中断 |
 | `_detect_test_command()` | `package.json` を優先チェックし、次に `pyproject.toml` / `setup.py` で Python を判定。pytest の実インストールも確認 |
+| `_extract_result_for_function()` | Jest（`--verbose` の `✓/✕ TC-xxx:` 行）と pytest verbose（`PASSED/FAILED` 行）の両フォーマットに対応して verdict を判定 |
 
 ### 6.3 Docker ワークスペース
 
@@ -312,9 +328,14 @@ backend/app/
 ### 6.4 テスト実行の詳細
 
 - `_detect_test_command()` が `package.json`（Node.js）→ `pyproject.toml` / `setup.py`（Python）の順に判定。`requirements.txt` 単独では Python とみなさない
+- Node.js プロジェクトは `npm test -- --watchAll=false --verbose 2>&1`、Python は `python -m pytest -v 2>&1` を実行
+- テスト実行前にバックエンドが `/tmp/xolvien_tc_results.jsonl` を `chmod 777` で作成。テストコードは `console.log('XOLVIEN_RESULT:{"tc_id":"TC-001","actual":"..."}')` で実際の出力値を記録
+- バックエンドはテスト出力の `XOLVIEN_RESULT:` 行をパースして `test_case_results.actual_output` に保存
+- `test_run.summary` は `test_case_results` の verdict 集計から生成（テスト関数数ではなく TC 件数ベース）
+- 自動修正ループ（最大3回）：修正プロンプトには「修正のみ行うこと、テストの再実行は不要」と指示してバックエンド側でテストを再実行
+- EACCES / EPERM / Cannot find module 等のインフラエラーを検出した場合は自動修正をスキップして即中断
 - 依存パッケージの未インストールも Claude Agent が検出してインストール
 - テストレポート保存先: `/workspace/repo/test-reports/test-report-{日時}-{種別}.md`
-- 自動修正フィードバック: 失敗テスト名・エラーメッセージ・標準出力
 
 ### 6.5 設計上の決定事項
 
