@@ -729,6 +729,13 @@ README:
         last_output = ""
         last_error = ""
 
+        # Pre-create the results file with world-writable permissions so any user can write to it
+        self.docker_service.execute_command(
+            task.container_id,
+            "rm -f /tmp/xolvien_tc_results.jsonl && touch /tmp/xolvien_tc_results.jsonl && chmod 777 /tmp/xolvien_tc_results.jsonl",
+            "/workspace/repo",
+        )
+
         for attempt in range(max_retries + 1):
             if attempt > 0:
                 yield f"\n[TEST] 自動修正 ({attempt}/{max_retries})...\n"
@@ -791,12 +798,28 @@ README:
                 yield f"\n[TEST] ✅ テストがパスしました\n"
                 break
             else:
+                # Detect infrastructure errors that Claude cannot fix by retrying
+                combined_out = (output + "\n" + error)
+                infra_error_patterns = [
+                    "EACCES", "EPERM", "ENOENT", "ENOSPC",
+                    "permission denied", "Permission denied",
+                    "Cannot find module", "command not found",
+                ]
+                infra_error = next(
+                    (p for p in infra_error_patterns if p in combined_out), None
+                )
+                if infra_error:
+                    yield f"\n[TEST] ⛔ インフラエラーを検出しました（{infra_error}）。自動修正をスキップします。\n"
+                    yield f"[TEST] テストコードまたは環境設定を確認してください。\n"
+                    break
+
                 if attempt < max_retries:
                     yield f"\n[TEST] ❌ テストが失敗しました (試行 {attempt + 1}/{max_retries + 1})\n"
                 else:
                     yield f"\n[TEST] 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
 
-        # Parse actual_output values from XOLVIEN_RESULT: lines in test output
+        # Parse actual_output values: first try XOLVIEN_RESULT: lines in stdout,
+        # then fall back to /tmp/xolvien_tc_results.jsonl written by appendFileSync
         actual_by_tc_id: dict[str, str] = {}
         for line in (last_output + "\n" + last_error).splitlines():
             if "XOLVIEN_RESULT:" not in line:
@@ -808,6 +831,22 @@ README:
                     actual_by_tc_id[row["tc_id"]] = str(row["actual"])
             except (ValueError, json.JSONDecodeError):
                 pass
+        if not actual_by_tc_id:
+            _, jsonl_content, _ = self.docker_service.execute_command(
+                task.container_id,
+                "cat /tmp/xolvien_tc_results.jsonl 2>/dev/null || echo ''",
+                "/workspace/repo",
+            )
+            for line in jsonl_content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if "tc_id" in row and "actual" in row:
+                        actual_by_tc_id[row["tc_id"]] = str(row["actual"])
+                except json.JSONDecodeError:
+                    pass
 
         # Save TestCaseResults
         last_combined = (last_output + "\n" + last_error).strip()
