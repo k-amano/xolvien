@@ -662,15 +662,41 @@ README:
 1. `package.json` や `pyproject.toml`、`requirements*.txt` を読み込み、テストフレームワーク（Jest, pytest 等）を特定してください
 2. 既存のテストファイルがあれば確認し、命名規則・構造に従ってください
 3. テストケース一覧の全ケースについて、指定された function_name で関数を生成してください
-   - 各テスト関数は操作（入力値）を実行し、期待出力と実際の出力を必ず print で出力すること
-   - 例: `print(f"期待: sk-test-12345, 実際: {{actual}}")`
+
+   **重要: 各テストケースは必ず以下のパターンで実際の出力値を `/tmp/xolvien_tc_results.jsonl` に書き出すこと**
+
+   Jest（Node.js）の場合の例:
+   ```javascript
+   const fs = require('fs');
+   test('TC-001: テスト名', () => {{
+     // テスト実行
+     const actual = /* 実際の値 */;
+     // 結果をファイルに記録（合否に関わらず必ず実行）
+     fs.appendFileSync('/tmp/xolvien_tc_results.jsonl',
+       JSON.stringify({{tc_id: 'TC-001', actual: String(actual)}}) + '\\n');
+     expect(actual).toBe(/* 期待値 */);
+   }});
+   ```
+
+   pytest（Python）の場合の例:
+   ```python
+   import json
+   def test_tc001_xxx():
+       actual = /* 実際の値 */
+       # 結果をファイルに記録（合否に関わらず必ず実行）
+       with open('/tmp/xolvien_tc_results.jsonl', 'a') as f:
+           f.write(json.dumps({{'tc_id': 'TC-001', 'actual': str(actual)}}) + '\\n')
+       assert actual == /* 期待値 */
+   ```
+
 4. テストの実行に必要な依存パッケージをインストールしてください
-5. テストを実行してください
-6. テスト実行結果を出力してください
+5. テスト実行前に `/tmp/xolvien_tc_results.jsonl` を削除してください（前回の結果が残らないよう）
+6. テストを実行してください
 
 注意:
 - function_name は変更しないこと（DBでの結果照合に使用する）
-- 各テスト関数で実際の出力値を print すること（実際の出力値のDB保存に使用する）
+- `/tmp/xolvien_tc_results.jsonl` への書き込みは `expect/assert` より前に行うこと（テスト失敗時も記録されるよう）
+- 記録する `actual` は文字列に変換すること
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", gen_prompt)
@@ -774,11 +800,31 @@ README:
                 else:
                     yield f"\n[TEST] 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
 
-        # Save TestCaseResults — use combined stdout+stderr so pytest output is found regardless of stream
+        # Read actual_output values written by test code to /tmp/xolvien_tc_results.jsonl
+        _, jsonl_content, _ = self.docker_service.execute_command(
+            task.container_id,
+            "cat /tmp/xolvien_tc_results.jsonl 2>/dev/null || echo ''",
+            "/workspace/repo",
+        )
+        actual_by_tc_id: dict[str, str] = {}
+        for line in jsonl_content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                if "tc_id" in row and "actual" in row:
+                    actual_by_tc_id[row["tc_id"]] = str(row["actual"])
+            except json.JSONDecodeError:
+                pass
+
+        # Save TestCaseResults
         last_combined = (last_output + "\n" + last_error).strip()
         executed_at = datetime.utcnow()
         for tc in tc_items:
-            verdict, actual = self._extract_result_for_function(last_combined, tc.function_name, tc.tc_id)
+            verdict, actual_fallback = self._extract_result_for_function(last_combined, tc.function_name, tc.tc_id)
+            # Prefer actual value from JSONL file; fall back to output parsing for failures
+            actual = actual_by_tc_id.get(tc.tc_id) or actual_fallback
             tcr = TestCaseResult(
                 test_case_item_id=tc.id,
                 test_run_id=test_run.id,
