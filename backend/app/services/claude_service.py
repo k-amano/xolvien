@@ -550,7 +550,7 @@ README:
             "/workspace/repo",
         )
         if pkg_json.strip():
-            return "npm test -- --watchAll=false 2>&1"
+            return "npm test -- --watchAll=false --verbose 2>&1"
 
         # Check for Python test frameworks
         _, pyproject, _ = self.docker_service.execute_command(
@@ -778,7 +778,7 @@ README:
         last_combined = (last_output + "\n" + last_error).strip()
         executed_at = datetime.utcnow()
         for tc in tc_items:
-            verdict, actual = self._extract_result_for_function(last_combined, tc.function_name)
+            verdict, actual = self._extract_result_for_function(last_combined, tc.function_name, tc.tc_id)
             tcr = TestCaseResult(
                 test_case_item_id=tc.id,
                 test_run_id=test_run.id,
@@ -790,10 +790,21 @@ README:
         await db.commit()
         yield f"[TEST] テスト結果を {len(tc_items)} 件保存しました\n"
 
-        # Save test report
-        from app.services.test_service import get_test_service
-        test_service = get_test_service()
-        summary = test_service._parse_test_summary(last_output, test_command)
+        # Compute summary from saved TestCaseResult verdicts (TC件数ベース)
+        tc_results_q = await db.execute(
+            sa_select(TestCaseResult).where(TestCaseResult.test_run_id == test_run.id)
+        )
+        tc_results_all = tc_results_q.scalars().all()
+        n_passed = sum(1 for r in tc_results_all if r.verdict == Verdict.PASSED)
+        n_failed = sum(1 for r in tc_results_all if r.verdict in (Verdict.FAILED, Verdict.ERROR))
+        n_skipped = sum(1 for r in tc_results_all if r.verdict == Verdict.SKIPPED)
+        n_unknown = sum(1 for r in tc_results_all if r.verdict is None)
+        parts = [f"{n_passed} passed", f"{n_failed} failed"]
+        if n_skipped:
+            parts.append(f"{n_skipped} skipped")
+        if n_unknown:
+            parts.append(f"{n_unknown} 未判定")
+        summary = ", ".join(parts)
         test_run.summary = summary
 
         now_str = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -875,60 +886,93 @@ README:
         yield f"\n[SYSTEM] テスト完了: {summary}\n"
 
     def _extract_result_for_function(
-        self, output: str, function_name: str | None
+        self, output: str, function_name: str | None, tc_id: str | None = None
     ) -> tuple[Verdict | None, str | None]:
         """
-        Scan test output for a specific function_name and return (verdict, actual_output).
-        Supports pytest verbose output and collects any print lines adjacent to the test result.
+        Scan test output for a specific test and return (verdict, actual_output).
+
+        Supports:
+        - pytest verbose (-v): "tests/test_foo.py::test_tc001_xxx PASSED/FAILED"
+          Failure detail block starts with "FAILED tests/...::function_name" in summary section;
+          E-prefixed lines contain AssertionError details.
+        - Jest (--verbose): "✓ TC-001: テスト名" (pass) / "✕ TC-001: テスト名" (fail)
+          Failure detail block starts with "● TC-001: テスト名";
+          "Expected:" / "Received:" lines contain assertion details.
         """
-        if not function_name:
+        import re as _re
+
+        if not function_name and not tc_id:
             return None, None
 
         lines = output.splitlines()
         verdict: Verdict | None = None
-        result_line: str | None = None
-        failure_lines: list[str] = []
-        in_failure_block = False
+        actual_lines: list[str] = []
 
+        # ── Pass 1: determine verdict ────────────────────────────���────────────
         for line in lines:
-            # pytest verbose: "tests/test_foo.py::test_tc001_xxx PASSED  [ 50%]"
-            if function_name in line:
+            # pytest verbose: "path/test_foo.py::test_tc001_xxx PASSED  [ n%]"
+            if function_name and function_name in line:
                 if "PASSED" in line:
                     verdict = Verdict.PASSED
-                    result_line = line.strip()
-                    in_failure_block = False
                 elif "FAILED" in line:
                     verdict = Verdict.FAILED
-                    result_line = line.strip()
                 elif "ERROR" in line:
                     verdict = Verdict.ERROR
-                    result_line = line.strip()
                 elif "SKIPPED" in line:
                     verdict = Verdict.SKIPPED
-                    result_line = line.strip()
-                    in_failure_block = False
 
-            # Collect FAILED detail block: "FAILED tests/...::test_tc001" section
-            if verdict == Verdict.FAILED and result_line and line.strip().startswith("FAILED " + function_name.split("_")[0]):
-                in_failure_block = True
+            # Jest --verbose: "  ✓ TC-001: テスト名 (n ms)"  or "  ✕ TC-001: テスト名"
+            if tc_id and (tc_id + ":") in line:
+                if _re.search(r'[✓√]', line):
+                    verdict = Verdict.PASSED
+                elif _re.search(r'[✕×✗]', line):
+                    verdict = Verdict.FAILED
+                elif 'skip' in line.lower() or 'todo' in line.lower():
+                    verdict = Verdict.SKIPPED
 
-            # Collect AssertionError and surrounding lines for actual output
-            if in_failure_block and (
-                "AssertionError" in line or
-                "assert " in line or
-                "Error:" in line or
-                line.strip().startswith("E ")
-            ):
+        if verdict is None:
+            return None, None
+
+        if verdict == Verdict.PASSED:
+            # For passed tests, actual output = expected output (test confirmed it matches)
+            return verdict, None
+
+        # ── Pass 2: collect failure details ──────────────────────────────────
+        in_block = False
+
+        # Jest failure block: starts with "  ● TC-001: テスト名", ends at next "  ●" or blank+indented line
+        if tc_id:
+            for line in lines:
                 stripped = line.strip()
-                if stripped:
-                    failure_lines.append(stripped)
+                if stripped.startswith("●") and (tc_id + ":") in line:
+                    in_block = True
+                    continue
+                if in_block:
+                    # Next failure block or separator ends this block
+                    if stripped.startswith("●") and (tc_id + ":") not in line:
+                        break
+                    if _re.match(r'^-{5,}$', stripped):
+                        break
+                    # Collect Expected/Received lines
+                    if stripped.startswith("Expected:") or stripped.startswith("Received:"):
+                        actual_lines.append(stripped)
+                    # Also collect "Error:" type lines
+                    elif stripped.startswith("Error:") or stripped.startswith("TypeError:"):
+                        actual_lines.append(stripped)
 
-        if failure_lines:
-            actual = "\n".join(failure_lines[:10])  # cap at 10 lines
-        elif result_line:
-            actual = result_line
-        else:
-            actual = None
+        # pytest failure block: "E   AssertionError: ..." lines near function_name in short summary
+        if function_name and not actual_lines:
+            capture = False
+            for line in lines:
+                stripped = line.strip()
+                if function_name in line and "FAILED" in line:
+                    capture = True
+                if capture and stripped.startswith("E "):
+                    actual_lines.append(stripped[2:].strip())
+                if capture and _re.match(r'^=+$', stripped):
+                    break
+
+        actual = "\n".join(actual_lines[:5]) if actual_lines else None
         return verdict, actual
 
 
