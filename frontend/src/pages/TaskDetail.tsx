@@ -1413,24 +1413,44 @@ export default function TaskDetail() {
   }
 
   function renderInputArea() {
+    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
     const isClarifyMode = chatEntries.length > 0 &&
       chatEntries[chatEntries.length - 1].type === 'clarify_question'
-    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
-    const canSend = !isBusy && instruction.trim().length > 0 && task?.status === 'idle'
 
+    const wrapperStyle: React.CSSProperties = {
+      borderTop: '1px solid #1e293b',
+      padding: '10px 12px',
+      flexShrink: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px',
+      background: '#0a0f1e',
+    }
+
+    // ── 単体テスト・実装確認フェーズ: テキストエリア非表示、アクションボタンのみ ──
+    if (selectedStep === 'unit_test' || selectedStep === 'review') {
+      return (
+        <div style={wrapperStyle}>
+          {renderActionButtons()}
+          <textarea
+            className="instruction-textarea"
+            value=""
+            onChange={() => {}}
+            placeholder="このフェーズではコメント入力は使用しません"
+            disabled
+            style={{ minHeight: '60px', marginBottom: 0, resize: 'none', opacity: 0.35 }}
+          />
+        </div>
+      )
+    }
+
+    // ── 実装フェーズ（要件確認・プロンプト生成） ──
+    const canSend = !isBusy && instruction.trim().length > 0 && task?.status === 'idle'
     const actionButtons = renderActionButtons()
 
     return (
-      <div style={{
-        borderTop: '1px solid #1e293b',
-        padding: '10px 12px',
-        flexShrink: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-        background: '#0a0f1e',
-      }}>
-        {/* Action buttons for current phase (shown above textarea when present) */}
+      <div style={wrapperStyle}>
+        {/* Confirm/regenerate buttons shown above textarea when unconfirmed prompt exists */}
         {actionButtons && (
           <div style={{ borderBottom: '1px solid #1e293b', paddingBottom: '8px' }}>
             {actionButtons}
