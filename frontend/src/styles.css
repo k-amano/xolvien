@@ -486,11 +486,9 @@ button:disabled {
 .instruction-panel {
   background: #ffffff;
   border-left: 2px solid #e2e8f0;
-  padding: 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  overflow-y: auto;
+  overflow: hidden;
   min-width: 0;
 }
 
@@ -512,7 +510,7 @@ button:disabled {
   border-radius: 6px;
   background: #f8fafc;
   color: #1a1a2e;
-  resize: none;
+  resize: vertical;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   outline: none;
 }

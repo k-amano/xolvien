@@ -4,9 +4,22 @@ import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
 import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
 import type { TestCaseItem } from '../types'
 
-type PromptState = 'idle' | 'clarifying' | 'generating' | 'confirming' | 'test_cases' | 'running_tests' | 'reviewing'
-
-type ChatMessage = { role: 'assistant' | 'user'; content: string }
+type ChatEntry =
+  | { type: 'user_instruction'; content: string }
+  | { type: 'clarify_question'; content: string }
+  | { type: 'clarify_answer'; content: string }
+  | { type: 'clarify_streaming'; content: string }
+  | { type: 'prompt_generating' }
+  | { type: 'prompt_generated'; content: string; confirmed: boolean }
+  | { type: 'implementation_running' }
+  | { type: 'implementation_done' }
+  | { type: 'test_cases_generating' }
+  | { type: 'test_cases_ready'; items: TestCaseItem[]; approved: boolean }
+  | { type: 'test_running'; label: string }
+  | { type: 'test_done'; summary: string; passed: boolean; items: TestCaseItem[] }
+  | { type: 'review'; prompt: string; items: TestCaseItem[]; resolved: boolean }
+  | { type: 'error'; message: string }
+  | { type: 'info'; message: string }
 
 type StepId = 'implement' | 'unit_test' | 'integration_test' | 'e2e_test' | 'review'
 type StepStatus = 'done_pass' | 'done_fail' | 'active' | 'pending'
@@ -15,8 +28,8 @@ interface StepInfo {
   id: StepId
   label: string
   status: StepStatus
-  resultLabel?: string  // e.g. "19件合格" or "3件失敗"
-  future?: boolean      // grayed out, not yet implemented
+  resultLabel?: string
+  future?: boolean
 }
 
 
@@ -110,30 +123,28 @@ export default function TaskDetail() {
   const [streaming, setStreaming] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [pushing, setPushing] = useState(false)
-  const [promptState, setPromptState] = useState<PromptState>('idle')
-  const [generatedPrompt, setGeneratedPrompt] = useState('')
   const [feedback, setFeedback] = useState('')
   const [generating, setGenerating] = useState(false)
-  const [clarifyHistory, setClarifyHistory] = useState<ChatMessage[]>([])
-  const [clarifyInput, setClarifyInput] = useState('')
   const [clarifying, setClarifying] = useState(false)
-  const [clarifyStreamText, setClarifyStreamText] = useState('')
 
-  // Test case generation state
-  const [generatedTestCases, setGeneratedTestCases] = useState('')
-  const [editableTestCases, setEditableTestCases] = useState('')
+  // Test case / test run state
   const [generatingTestCases, setGeneratingTestCases] = useState(false)
   const [runningTests, setRunningTests] = useState(false)
   const [runningTestType, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
   const [testPhaseLabel, setTestPhaseLabel] = useState<string | null>(null)
   const testCountRef = useRef({ passed: 0, failed: 0 })
-  const [testResultSummary, setTestResultSummary] = useState<string | null>(null)
-  const [testPassed, setTestPassed] = useState<boolean | null>(null)
-  const [testCaseItems, setTestCaseItems] = useState<TestCaseItem[]>([])
+  const setTestResultSummary = (_v: string | null) => { /* stored in chatEntries */ }
+  const setTestPassed = (_v: boolean | null) => { /* stored in chatEntries */ }
+  const [, setTestCaseItems] = useState<TestCaseItem[]>([])
   const [showRevisionInput, setShowRevisionInput] = useState(false)
   const [revisionText, setRevisionText] = useState('')
-  // The implementation prompt that was confirmed for execution (saved to pass into test flow)
   const [confirmedPrompt, setConfirmedPrompt] = useState('')
+
+  // Chat history (append-only)
+  const [chatEntries, setChatEntries] = useState<ChatEntry[]>([])
+  const streamingEntryIndexRef = useRef<number>(-1)
+  const chatEndRef = useRef<HTMLDivElement>(null)
+
   // Resume / step navigation state
   const [resumeChecked, setResumeChecked] = useState(false)
   const [selectedStep, setSelectedStep] = useState<StepId | null>(null)
@@ -182,13 +193,6 @@ export default function TaskDetail() {
     document.body.style.userSelect = 'none'
   }
 
-  // Sync editable test cases when generation finishes
-  useEffect(() => {
-    if (!generatingTestCases && generatedTestCases && !editableTestCases) {
-      setEditableTestCases(generatedTestCases)
-    }
-  }, [generatingTestCases, generatedTestCases, editableTestCases])
-
   // On first load: collect step history from DB and restore state
   useEffect(() => {
     if (resumeChecked) return
@@ -201,57 +205,68 @@ export default function TaskDetail() {
           getLastCompletedInstruction(taskId),
           getTestCaseItems(taskId),
         ])
-        if (items.length > 0) setTestCaseItems(items)
 
         const hasImpl = !!lastInstruction
         const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
 
-        // Nothing done yet
         if (!hasImpl && !lastUnit) return
 
         const prompt = lastInstruction?.content ?? ''
-        const testCases = lastUnit?.test_cases ?? ''
+        const initialEntries: ChatEntry[] = []
 
-        if (prompt) setConfirmedPrompt(prompt)
-        if (testCases) {
-          setGeneratedTestCases(testCases)
-          setEditableTestCases(testCases)
+        if (prompt) {
+          setConfirmedPrompt(prompt)
+          initialEntries.push({ type: 'user_instruction', content: prompt })
+          initialEntries.push({ type: 'prompt_generated', content: prompt, confirmed: true })
+          initialEntries.push({ type: 'implementation_done' })
         }
 
-        // Build step statuses
+        if (items.length > 0) {
+          setTestCaseItems(items)
+          const testCasesApproved = lastUnit != null
+          initialEntries.push({ type: 'test_cases_ready', items, approved: testCasesApproved })
+        } else if (hasImpl) {
+          initialEntries.push({ type: 'test_cases_ready', items: [], approved: false })
+        }
+
+        if (lastUnit) {
+          setTestResultSummary(lastUnit.summary ?? null)
+          setTestPassed(lastUnit.passed)
+          initialEntries.push({
+            type: 'test_done',
+            summary: lastUnit.summary ?? '',
+            passed: lastUnit.passed,
+            items: items,
+          })
+          if (lastUnit.passed) {
+            initialEntries.push({ type: 'review', prompt, items, resolved: false })
+          } else {
+            initialEntries.push({ type: 'test_cases_ready', items, approved: false })
+          }
+        }
+
+        setChatEntries(initialEntries)
+
         setSteps(prev => prev.map(step => {
           switch (step.id) {
             case 'implement':
-              return hasImpl
-                ? { ...step, status: 'done_pass' }
-                : step
+              return hasImpl ? { ...step, status: 'done_pass' } : step
             case 'unit_test':
               if (!lastUnit) return hasImpl ? { ...step, status: 'active' } : step
               return lastUnit.passed
                 ? { ...step, status: 'done_pass', resultLabel: lastUnit.summary ?? undefined }
                 : { ...step, status: 'done_fail', resultLabel: lastUnit.summary ?? undefined }
             case 'review':
-              return lastUnit?.passed
-                ? { ...step, status: 'active' }
-                : step
+              return lastUnit?.passed ? { ...step, status: 'active' } : step
             default:
               return step
           }
         }))
 
-        // Auto-navigate to the most appropriate step
-        if (lastUnit?.summary) setTestResultSummary(lastUnit.summary)
-        if (lastUnit != null) setTestPassed(lastUnit.passed)
-        if (lastUnit?.passed) {
-          setPromptState('reviewing')
-          setSelectedStep('review')
-        } else if (lastUnit) {
-          setPromptState('test_cases')
-          setSelectedStep('unit_test')
-        } else if (hasImpl) {
-          setPromptState('test_cases')
-          setSelectedStep('unit_test')
-        }
+        if (lastUnit?.passed) setSelectedStep('review')
+        else if (lastUnit) setSelectedStep('unit_test')
+        else if (hasImpl) setSelectedStep('unit_test')
+
       } catch {
         // Ignore errors — start fresh
       }
@@ -260,6 +275,11 @@ export default function TaskDetail() {
     checkResume()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId])
+
+  // Auto-scroll chat history when new entries arrive
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatEntries])
 
   // Auto-scroll log viewer
   const scrollToBottom = useCallback(() => {
@@ -326,14 +346,12 @@ export default function TaskDetail() {
     ws.onmessage = (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data as string)
-        // Skip control messages from the server (connected, ping)
         if (parsed.type === 'connected' || parsed.type === 'ping') return
         const log: TaskLog = parsed
         if (seenLogIdsRef.current.has(log.id)) return
         seenLogIdsRef.current.add(log.id)
         setLogEntries(prev => [...prev, { kind: 'log', data: log }])
       } catch {
-        // If it's not JSON, treat as plain text info log
         const fakeLog: TaskLog = {
           id: Date.now(),
           task_id: taskId,
@@ -360,221 +378,198 @@ export default function TaskDetail() {
     }
   }, [taskId])
 
-  async function runInstruction(content: string) {
-    if (!content.trim() || streaming) return
-    setStreaming(true)
-
-    streamKeyRef.current += 1
-    const currentKey = `stream-${streamKeyRef.current}`
-
-    setLogEntries(prev => [
-      ...prev,
-      { kind: 'stream', text: '', key: currentKey },
-    ])
-
-    await executeInstructionStream(
-      taskId,
-      content,
-      (chunk: string) => {
-        setLogEntries(prev =>
-          prev.map(entry =>
-            entry.kind === 'stream' && entry.key === currentKey
-              ? { ...entry, text: entry.text + chunk }
-              : entry
-          )
-        )
-      },
-      () => { setStreaming(false) },
-      (err: string) => {
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `Instruction error: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
-        setStreaming(false)
-      }
-    )
-  }
+  // ─── Handler functions ────────────────────────────────────────────────────
 
   async function handleStartClarify() {
     if (!instruction.trim() || clarifying || generating) return
-    setClarifyHistory([])
-    setClarifyStreamText('')
+    const userMsg = instruction.trim()
+
+    setChatEntries(prev => [...prev, { type: 'user_instruction', content: userMsg }])
     setClarifying(true)
-    setPromptState('clarifying')
 
     let streamedText = ''
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'clarify_streaming', content: '' }]
+    })
+
     await clarifyStream(
       taskId,
-      instruction.trim(),
+      userMsg,
       [],
       (chunk) => {
         streamedText += chunk
-        setClarifyStreamText(streamedText)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current && e.type === 'clarify_streaming'
+            ? { ...e, content: streamedText }
+            : e
+        ))
       },
       () => {
         setClarifying(false)
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\n?/, '')
-          setGeneratedPrompt(prompt)
-          setClarifyStreamText('')
-          setClarifyHistory([])
-          setPromptState('confirming')
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'prompt_generated', content: prompt, confirmed: false }
+              : e
+          ))
         } else {
-          setClarifyHistory([{ role: 'assistant', content: streamedText }])
-          setClarifyStreamText('')
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'clarify_question', content: streamedText }
+              : e
+          ))
         }
       },
       (err) => {
         setClarifying(false)
-        setPromptState('idle')
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `要件確認エラー: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `要件確認エラー: ${err}` }
+            : e
+        ))
       }
     )
   }
 
   async function handleSendClarifyAnswer() {
-    if (!clarifyInput.trim() || clarifying) return
-    const userMsg = clarifyInput.trim()
-    setClarifyInput('')
-    const newHistory: ChatMessage[] = [...clarifyHistory, { role: 'user', content: userMsg }]
-    setClarifyHistory(newHistory)
+    if (!instruction.trim() || clarifying) return
+    const userMsg = instruction.trim()
+    setInstruction('')
+
+    // Build history from chatEntries
+    const history = chatEntries
+      .filter(e => e.type === 'clarify_question' || e.type === 'clarify_answer')
+      .map(e => ({
+        role: (e.type === 'clarify_question' ? 'assistant' : 'user') as 'assistant' | 'user',
+        content: (e as { content: string }).content,
+      }))
+    const newHistory = [...history, { role: 'user' as const, content: userMsg }]
+
+    setChatEntries(prev => {
+      const withAnswer = [...prev, { type: 'clarify_answer' as const, content: userMsg }]
+      streamingEntryIndexRef.current = withAnswer.length
+      return [...withAnswer, { type: 'clarify_streaming' as const, content: '' }]
+    })
     setClarifying(true)
-    setClarifyStreamText('')
 
     let streamedText = ''
     await clarifyStream(
       taskId,
-      instruction.trim(),
+      (chatEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined)?.content ?? '',
       newHistory,
       (chunk) => {
         streamedText += chunk
-        setClarifyStreamText(streamedText)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current && e.type === 'clarify_streaming'
+            ? { ...e, content: streamedText }
+            : e
+        ))
       },
       () => {
         setClarifying(false)
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\n?/, '')
-          setGeneratedPrompt(prompt)
-          setClarifyStreamText('')
-          setClarifyHistory([])
-          setPromptState('confirming')
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'prompt_generated', content: prompt, confirmed: false }
+              : e
+          ))
         } else {
-          setClarifyHistory(prev => [...prev, { role: 'assistant', content: streamedText }])
-          setClarifyStreamText('')
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'clarify_question', content: streamedText }
+              : e
+          ))
         }
       },
       (err) => {
         setClarifying(false)
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `要件確認エラー: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `要件確認エラー: ${err}` }
+            : e
+        ))
       }
     )
   }
 
   async function handleSkipClarify() {
-    setPromptState('generating')
+    const originalInstruction = instruction.trim()
+    if (!chatEntries.some(e => e.type === 'user_instruction') && originalInstruction) {
+      setChatEntries(prev => [...prev, { type: 'user_instruction', content: originalInstruction }])
+    }
     setGenerating(true)
-    setGeneratedPrompt('')
-    setClarifyHistory([])
-    setClarifyStreamText('')
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'prompt_generating' }]
+    })
 
+    // Use the current chatEntries snapshot to find user_instruction
+    // We need to read it before state updates; capture via closure
+    const currentEntries = chatEntries
+    const foundInstruction = currentEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined
+    const instructionContent = foundInstruction?.content ?? originalInstruction
+
+    let promptText = ''
     await generatePromptStream(
       taskId,
-      instruction.trim(),
+      instructionContent,
       feedback,
-      (chunk) => setGeneratedPrompt(prev => prev + chunk),
+      (chunk) => { promptText += chunk },
       () => {
         setGenerating(false)
-        setPromptState('confirming')
+        setFeedback('')
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'prompt_generated', content: promptText, confirmed: false }
+            : e
+        ))
       },
       (err) => {
         setGenerating(false)
-        setPromptState('idle')
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `プロンプト生成エラー: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `プロンプト生成エラー: ${err}` }
+            : e
+        ))
       }
     )
   }
 
   async function handleGeneratePrompt() {
     if (!instruction.trim() || generating) return
+    const userMsg = instruction.trim()
+    setChatEntries(prev => [...prev, { type: 'user_instruction', content: userMsg }])
     setGenerating(true)
-    setGeneratedPrompt('')
-    setPromptState('generating')
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'prompt_generating' }]
+    })
 
+    let promptText = ''
     await generatePromptStream(
       taskId,
-      instruction.trim(),
+      userMsg,
       feedback,
-      (chunk) => setGeneratedPrompt(prev => prev + chunk),
+      (chunk) => { promptText += chunk },
       () => {
         setGenerating(false)
-        setPromptState('confirming')
+        setFeedback('')
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'prompt_generated', content: promptText, confirmed: false }
+            : e
+        ))
       },
       (err) => {
         setGenerating(false)
-        setPromptState('idle')
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `プロンプト生成エラー: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `プロンプト生成エラー: ${err}` }
+            : e
+        ))
       }
     )
   }
@@ -582,98 +577,141 @@ export default function TaskDetail() {
   async function handleRegenerate() {
     if (generating) return
     setGenerating(true)
-    setGeneratedPrompt('')
-    setPromptState('generating')
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'prompt_generated' && !e.confirmed ? { ...e, confirmed: true } : e
+    ))
+    const originalInstruction = chatEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined
 
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'prompt_generating' }]
+    })
+
+    let promptText = ''
     await generatePromptStream(
       taskId,
-      instruction.trim(),
+      originalInstruction?.content ?? '',
       feedback,
-      (chunk) => setGeneratedPrompt(prev => prev + chunk),
+      (chunk) => { promptText += chunk },
       () => {
         setGenerating(false)
         setFeedback('')
-        setPromptState('confirming')
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'prompt_generated', content: promptText, confirmed: false }
+            : e
+        ))
       },
       (err) => {
         setGenerating(false)
-        setPromptState('confirming')
-        alert(`再生成エラー: ${err}`)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `再生成エラー: ${err}` }
+            : e
+        ))
       }
     )
   }
 
-  async function handleConfirmAndExecute() {
-    const prompt = generatedPrompt.trim()
-    if (!prompt) return
+  async function handleConfirmAndExecute(prompt: string) {
     setConfirmedPrompt(prompt)
-    setPromptState('idle')
     setInstruction('')
-    setGeneratedPrompt('')
     setFeedback('')
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'prompt_generated' && !e.confirmed ? { ...e, confirmed: true } : e
+    ))
 
-    // Run implementation
-    await runInstruction(prompt)
+    setChatEntries(prev => [...prev, { type: 'implementation_running' }])
+    setStreaming(true)
 
-    // Mark implement step as done
-    setSteps(prev => prev.map(s => s.id === 'implement' ? { ...s, status: 'done_pass' } : s))
+    streamKeyRef.current += 1
+    const currentKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
 
-    // After implementation completes, generate test cases
-    setPromptState('test_cases')
-    setGeneratedTestCases('')
-    setEditableTestCases('')
-    setGeneratingTestCases(true)
-    await generateTestCasesStream(
+    await executeInstructionStream(
       taskId,
       prompt,
-      (chunk) => setGeneratedTestCases(prev => prev + chunk),
+      (chunk) => {
+        setLogEntries(prev => prev.map(entry =>
+          entry.kind === 'stream' && entry.key === currentKey
+            ? { ...entry, text: entry.text + chunk }
+            : entry
+        ))
+      },
       async () => {
-        setGeneratingTestCases(false)
-        try {
-          const items = await getTestCaseItems(taskId)
-          setTestCaseItems(items)
-        } catch { /* ignore */ }
+        setStreaming(false)
+        setSteps(prev => prev.map(s => s.id === 'implement' ? { ...s, status: 'done_pass' } : s))
+        setChatEntries(prev => {
+          const idx = [...prev].reverse().findIndex(e => e.type === 'implementation_running')
+          if (idx === -1) return prev
+          const realIdx = prev.length - 1 - idx
+          return prev.map((e, i) => i === realIdx ? { type: 'implementation_done' } : e)
+        })
+
+        setGeneratingTestCases(true)
+        setChatEntries(prev => {
+          streamingEntryIndexRef.current = prev.length
+          return [...prev, { type: 'test_cases_generating' }]
+        })
+
+        await generateTestCasesStream(
+          taskId,
+          prompt,
+          (_chunk) => { /* streaming to log viewer via WebSocket */ },
+          async () => {
+            setGeneratingTestCases(false)
+            try {
+              const items = await getTestCaseItems(taskId)
+              setTestCaseItems(items)
+              setChatEntries(prev => prev.map((e, i) =>
+                i === streamingEntryIndexRef.current
+                  ? { type: 'test_cases_ready', items, approved: false }
+                  : e
+              ))
+            } catch {
+              setChatEntries(prev => prev.map((e, i) =>
+                i === streamingEntryIndexRef.current
+                  ? { type: 'error', message: 'テストケース取得エラー' }
+                  : e
+              ))
+            }
+          },
+          (err) => {
+            setGeneratingTestCases(false)
+            setChatEntries(prev => prev.map((e, i) =>
+              i === streamingEntryIndexRef.current
+                ? { type: 'error', message: `テストケース生成エラー: ${err}` }
+                : e
+            ))
+          }
+        )
       },
       (err) => {
-        setGeneratingTestCases(false)
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `テストケース生成エラー: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+        setStreaming(false)
+        setChatEntries(prev => {
+          const idx = [...prev].reverse().findIndex(e => e.type === 'implementation_running')
+          if (idx === -1) return [...prev, { type: 'error', message: `実装エラー: ${err}` }]
+          const realIdx = prev.length - 1 - idx
+          return prev.map((e, i) => i === realIdx ? { type: 'error', message: `実装エラー: ${err}` } : e)
+        })
       }
     )
   }
 
-  function handleCancelConfirm() {
-    setPromptState('idle')
-    setGeneratedPrompt('')
-    setFeedback('')
-  }
-
-  function handleCancelClarify() {
-    setPromptState('idle')
-    setClarifyHistory([])
-    setClarifyStreamText('')
-    setClarifyInput('')
-  }
-
-  async function handleApproveTestCases() {
-    if (testCaseItems.length === 0 || runningTests) return
+  async function handleApproveTestCases(items: TestCaseItem[]) {
+    if (items.length === 0 || runningTests) return
     setRunningTests(true)
     setRunningTestType('unit')
-    setTestPhaseLabel('テストコードを生成中')
     testCountRef.current = { passed: 0, failed: 0 }
-    setPromptState('running_tests')
+
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'test_cases_ready' && !e.approved ? { ...e, approved: true } : e
+    ))
+
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'test_running', label: 'テストコードを生成中' }]
+    })
 
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
@@ -690,26 +728,21 @@ export default function TaskDetail() {
               : entry
           )
         )
+        let newLabel: string | null = null
         if (chunk.includes('[TEST] テストを実行しています') || chunk.includes('[TEST] テストを再実行しています')) {
           testCountRef.current = { passed: 0, failed: 0 }
-          setTestPhaseLabel('テストを実行中 (0件完了)')
+          newLabel = 'テストを実行中 (0件完了)'
         } else if (chunk.includes('[TEST] 自動修正')) {
           const m = chunk.match(/自動修正 \((\d+)\/(\d+)\)/)
-          setTestPhaseLabel(m ? `自動修正中 ${m[1]}/${m[2]}` : '自動修正中')
+          newLabel = m ? `自動修正中 ${m[1]}/${m[2]}` : '自動修正中'
         } else {
-          // Count individual test results line by line
-          // pytest: "PASSED" / "FAILED" per line, or dots "." = pass "F" = fail
-          // Jest: "✓" = pass "✕" / "×" = fail
           let updated = false
           for (const line of chunk.split('\n')) {
             if (/\bPASSED\b/.test(line) || /^\s*✓/.test(line) || /^\s*✔/.test(line)) {
-              testCountRef.current.passed += 1
-              updated = true
+              testCountRef.current.passed += 1; updated = true
             } else if (/\bFAILED\b/.test(line) || /^\s*✕/.test(line) || /^\s*✗/.test(line) || /^\s*×/.test(line)) {
-              testCountRef.current.failed += 1
-              updated = true
+              testCountRef.current.failed += 1; updated = true
             }
-            // pytest dot-style: a line of dots/F like "...F..F."
             const dotMatch = line.match(/^[.F]+$/)
             if (dotMatch) {
               testCountRef.current.passed += (line.match(/\./g) ?? []).length
@@ -720,38 +753,42 @@ export default function TaskDetail() {
           if (updated) {
             const { passed, failed } = testCountRef.current
             const total = passed + failed
-            const label = failed > 0
-              ? `テストを実行中 (${total}件完了 / ${failed}件失敗)`
-              : `テストを実行中 (${total}件完了)`
-            setTestPhaseLabel(label)
+            newLabel = failed > 0 ? `テストを実行中 (${total}件完了 / ${failed}件失敗)` : `テストを実行中 (${total}件完了)`
           }
+        }
+        if (newLabel) {
+          setTestPhaseLabel(newLabel)
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current && e.type === 'test_running'
+              ? { ...e, label: newLabel! }
+              : e
+          ))
         }
       },
       async () => {
         setRunningTests(false)
         setRunningTestType(null)
         setTestPhaseLabel(null)
-        setPromptState('reviewing')
-        // Refresh step statuses from DB
         try {
-          const [runs, items] = await Promise.all([
-            getTestRuns(taskId),
-            getTestCaseItems(taskId),
-          ])
-          setTestCaseItems(items)
+          const [runs, freshItems] = await Promise.all([getTestRuns(taskId), getTestCaseItems(taskId)])
+          setTestCaseItems(freshItems)
           const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
           if (lastUnit) {
             setTestResultSummary(lastUnit.summary ?? null)
             setTestPassed(lastUnit.passed)
             setSteps(prev => prev.map(s => {
-              if (s.id === 'unit_test')  return {
-                ...s,
-                status: lastUnit.passed ? 'done_pass' : 'done_fail',
-                resultLabel: lastUnit.summary ?? undefined,
-              }
-              if (s.id === 'review')     return { ...s, status: 'active' }
+              if (s.id === 'unit_test') return { ...s, status: lastUnit.passed ? 'done_pass' : 'done_fail', resultLabel: lastUnit.summary ?? undefined }
+              if (s.id === 'review') return { ...s, status: 'active' }
               return s
             }))
+            setChatEntries(prev => {
+              const mapped = prev.map((e, i) =>
+                i === streamingEntryIndexRef.current && e.type === 'test_running'
+                  ? { type: 'test_done' as const, summary: lastUnit.summary ?? '', passed: lastUnit.passed, items: freshItems }
+                  : e
+              )
+              return [...mapped, { type: 'review' as const, prompt: confirmedPrompt, items: freshItems, resolved: false }]
+            })
           }
         } catch { /* ignore */ }
       },
@@ -759,61 +796,123 @@ export default function TaskDetail() {
         setRunningTests(false)
         setRunningTestType(null)
         setTestPhaseLabel(null)
-        setPromptState('reviewing')
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `テスト実行エラー: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current && e.type === 'test_running'
+            ? { type: 'error', message: `テスト実行エラー: ${err}` }
+            : e
+        ))
+      }
+    )
+  }
+
+  async function handleGenerateTestCasesManual() {
+    if (!confirmedPrompt || task?.status !== 'idle') return
+    setGeneratingTestCases(true)
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'test_cases_generating' }]
+    })
+    await generateTestCasesStream(
+      taskId,
+      confirmedPrompt,
+      (_chunk) => {},
+      async () => {
+        setGeneratingTestCases(false)
+        try {
+          const items = await getTestCaseItems(taskId)
+          setTestCaseItems(items)
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'test_cases_ready', items, approved: false }
+              : e
+          ))
+        } catch {
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'error', message: 'テストケース取得エラー' }
+              : e
+          ))
+        }
+      },
+      (err) => {
+        setGeneratingTestCases(false)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `テストケース生成エラー: ${err}` }
+            : e
+        ))
+      }
+    )
+  }
+
+  function handleApproveImplementation() {
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'review' && !e.resolved ? { ...e, resolved: true } : e
+    ))
+    setChatEntries(prev => [...prev, { type: 'info', message: '実装を承認しました。新しい指示を入力してください。' }])
+    setConfirmedPrompt('')
+    setTestCaseItems([])
+  }
+
+  function handleRejectImplementation() {
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'review' && !e.resolved ? { ...e, resolved: true } : e
+    ))
+    setChatEntries(prev => [...prev, { type: 'info', message: '差し戻しました。指示を修正して再実行してください。' }])
+    setInstruction(confirmedPrompt)
+    setConfirmedPrompt('')
+  }
+
+  async function handleRevisionRequest(revisionFeedback: string) {
+    setShowRevisionInput(false)
+    setRevisionText('')
+    setGeneratingTestCases(true)
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'test_cases_ready' && !e.approved ? { ...e, approved: true } : e
+    ))
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'test_cases_generating' }]
+    })
+    await generateTestCasesStream(
+      taskId,
+      confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + revisionFeedback,
+      (_chunk) => {},
+      async () => {
+        setGeneratingTestCases(false)
+        try {
+          const items = await getTestCaseItems(taskId)
+          setTestCaseItems(items)
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'test_cases_ready', items, approved: false }
+              : e
+          ))
+        } catch {
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'error', message: 'テストケース取得エラー' }
+              : e
+          ))
+        }
+      },
+      (err) => {
+        setGeneratingTestCases(false)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `テストケース再生成エラー: ${err}` }
+            : e
+        ))
       }
     )
   }
 
   function handleStepClick(stepId: StepId) {
     if (streaming || runningTests || generatingTestCases || generating || clarifying) return
-
     setSelectedStep(stepId)
-
-    switch (stepId) {
-      case 'implement':
-        if (confirmedPrompt) setInstruction(confirmedPrompt)
-        setPromptState('idle')
-        setGeneratedPrompt('')
-        setFeedback('')
-        break
-      case 'unit_test':
-        setPromptState('test_cases')
-        break
-      case 'review':
-        setPromptState('reviewing')
-        break
-      default:
-        break
+    if (stepId === 'implement' && confirmedPrompt) {
+      setInstruction(confirmedPrompt)
     }
-  }
-
-  function handleApproveImplementation() {
-    setPromptState('idle')
-    setConfirmedPrompt('')
-    setGeneratedTestCases('')
-    setEditableTestCases('')
-  }
-
-  function handleRejectImplementation() {
-    setPromptState('idle')
-    setInstruction(confirmedPrompt)
-    setConfirmedPrompt('')
-    setGeneratedTestCases('')
-    setEditableTestCases('')
   }
 
   async function handleGitPush() {
@@ -869,8 +968,550 @@ export default function TaskDetail() {
     }
   }
 
-  const canGenerate =
-    task?.status === 'idle' && !streaming && !generating && !clarifying && !generatingTestCases && !runningTests && instruction.trim().length > 0 && promptState === 'idle'
+  // ─── Render helpers ───────────────────────────────────────────────────────
+
+  function renderChatEntry(entry: ChatEntry, idx: number) {
+    // Determine which entries are the "last active" of each type
+    const lastUnconfirmedPromptIdx = chatEntries.reduce((last, e, i) =>
+      e.type === 'prompt_generated' && !e.confirmed ? i : last, -1)
+    const lastUnapprovedTestCasesIdx = chatEntries.reduce((last, e, i) =>
+      e.type === 'test_cases_ready' && !e.approved ? i : last, -1)
+    const lastUnresolvedReviewIdx = chatEntries.reduce((last, e, i) =>
+      e.type === 'review' && !e.resolved ? i : last, -1)
+
+    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
+
+    switch (entry.type) {
+      case 'user_instruction':
+        return (
+          <div key={idx} style={{
+            background: '#1e3a5f',
+            border: '1px solid #2563eb',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            fontSize: '0.82rem',
+            color: '#bfdbfe',
+            whiteSpace: 'pre-wrap',
+            lineHeight: 1.6,
+          }}>
+            <span style={{ fontSize: '0.72rem', color: '#60a5fa', marginBottom: '4px', display: 'block', fontWeight: 600 }}>あなたの指示</span>
+            {entry.content}
+          </div>
+        )
+
+      case 'clarify_question':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            fontSize: '0.82rem',
+            color: '#e2e8f0',
+            whiteSpace: 'pre-wrap',
+            lineHeight: 1.6,
+          }}>
+            <span style={{ fontSize: '0.72rem', color: '#6366f1', marginBottom: '4px', display: 'block', fontWeight: 600 }}>Claude</span>
+            {entry.content}
+          </div>
+        )
+
+      case 'clarify_answer':
+        return (
+          <div key={idx} style={{
+            background: '#1e3a5f',
+            border: '1px solid #2563eb',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            fontSize: '0.82rem',
+            color: '#bfdbfe',
+            whiteSpace: 'pre-wrap',
+            lineHeight: 1.6,
+            marginLeft: '20px',
+          }}>
+            <span style={{ fontSize: '0.72rem', color: '#60a5fa', marginBottom: '4px', display: 'block', fontWeight: 600 }}>あなた</span>
+            {entry.content}
+          </div>
+        )
+
+      case 'clarify_streaming':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            fontSize: '0.82rem',
+            color: '#94a3b8',
+            whiteSpace: 'pre-wrap',
+            lineHeight: 1.6,
+          }}>
+            <span style={{ fontSize: '0.72rem', color: '#6366f1', marginBottom: '4px', display: 'block', fontWeight: 600 }}>Claude</span>
+            {entry.content || <><span className="spinner" style={{ width: '10px', height: '10px', marginRight: '4px' }} />考え中...</>}
+          </div>
+        )
+
+      case 'prompt_generating':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '10px 12px',
+            fontSize: '0.82rem',
+            color: '#94a3b8',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <span className="spinner" style={{ width: '12px', height: '12px', marginRight: 0 }} />
+            プロンプトを生成しています...
+          </div>
+        )
+
+      case 'prompt_generated': {
+        const isLastActive = idx === lastUnconfirmedPromptIdx
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: `1px solid ${entry.confirmed ? '#334155' : '#6366f1'}`,
+            borderRadius: '6px',
+            padding: '12px',
+            fontSize: '0.82rem',
+          }}>
+            <div style={{ color: '#6366f1', fontSize: '0.72rem', marginBottom: '6px', fontWeight: 600 }}>
+              生成されたプロンプト {entry.confirmed ? '(確定済み)' : ''}
+            </div>
+            <div style={{
+              fontFamily: 'monospace',
+              color: '#e2e8f0',
+              whiteSpace: 'pre-wrap',
+              lineHeight: 1.5,
+              maxHeight: entry.confirmed ? '120px' : 'none',
+              overflowY: entry.confirmed ? 'auto' : 'visible',
+            }}>
+              {entry.content}
+            </div>
+            {isLastActive && !entry.confirmed && (
+              <>
+                <div style={{ marginTop: '10px' }}>
+                  <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '0 0 4px' }}>
+                    このプロンプトへの指摘・追加要望（任意）
+                  </p>
+                  <textarea
+                    className="instruction-textarea"
+                    value={feedback}
+                    onChange={e => setFeedback(e.target.value)}
+                    placeholder="例: エラーメッセージの表示場所も指定してほしい"
+                    rows={2}
+                    style={{ marginBottom: '8px', minHeight: '50px', fontSize: '0.82rem' }}
+                    disabled={isBusy}
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn-primary"
+                    onClick={() => handleConfirmAndExecute(entry.content)}
+                    disabled={isBusy}
+                    style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                  >
+                    確定して実行
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={handleRegenerate}
+                    disabled={isBusy}
+                    style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                  >
+                    {generating ? '生成中...' : '再生成'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )
+      }
+
+      case 'implementation_running':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '10px 12px',
+            fontSize: '0.82rem',
+            color: '#93c5fd',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <span className="spinner" style={{ width: '12px', height: '12px', marginRight: 0 }} />
+            実装を実行しています...（左ペインのログをご確認ください）
+          </div>
+        )
+
+      case 'implementation_done':
+        return (
+          <div key={idx} style={{
+            background: '#052e16',
+            border: '1px solid #16a34a',
+            borderRadius: '6px',
+            padding: '10px 12px',
+            fontSize: '0.82rem',
+            color: '#86efac',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            ✅ 実装が完了しました
+          </div>
+        )
+
+      case 'test_cases_generating':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '10px 12px',
+            fontSize: '0.82rem',
+            color: '#94a3b8',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <span className="spinner" style={{ width: '12px', height: '12px', marginRight: 0 }} />
+            テストケースを生成しています...
+          </div>
+        )
+
+      case 'test_cases_ready': {
+        const isLastActive = idx === lastUnapprovedTestCasesIdx
+        const showButtons = isLastActive && !entry.approved && !isBusy
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: `1px solid ${entry.approved ? '#334155' : '#6366f1'}`,
+            borderRadius: '6px',
+            padding: '12px',
+            fontSize: '0.82rem',
+          }}>
+            <div style={{ color: '#6366f1', fontSize: '0.72rem', marginBottom: '8px', fontWeight: 600 }}>
+              テストケース {entry.approved ? '(承認済み)' : `— ${entry.items.length} 件`}
+            </div>
+            {entry.items.length === 0 ? (
+              <div style={{ color: '#475569', fontSize: '0.82rem', marginBottom: showButtons ? '8px' : 0 }}>
+                テストケースがまだ生成されていません
+                {confirmedPrompt && task?.status !== 'idle' && (
+                  <span style={{ display: 'block', fontSize: '0.78rem', color: '#ef4444', marginTop: '4px' }}>
+                    タスクのコンテナが起動していません（ステータス: {task?.status}）
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto', maxHeight: entry.approved ? '120px' : '200px', overflowY: 'auto', marginBottom: showButtons ? '8px' : 0 }}>
+                <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>ID</th>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>対象画面</th>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>テスト項目</th>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>期待出力</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {entry.items.map((tc) => (
+                      <tr key={tc.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                        <td style={{ padding: '3px 6px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
+                        <td style={{ padding: '3px 6px', color: '#94a3b8', whiteSpace: 'nowrap' }}>{tc.target_screen ?? '—'}</td>
+                        <td style={{ padding: '3px 6px', color: '#cbd5e1' }}>{tc.test_item}</td>
+                        <td style={{ padding: '3px 6px', color: '#94a3b8', fontSize: '0.72rem' }}>{tc.expected_output ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {isLastActive && !entry.approved && entry.items.length === 0 && confirmedPrompt && task?.status === 'idle' && (
+              <button
+                className="btn-primary"
+                onClick={handleGenerateTestCasesManual}
+                disabled={isBusy}
+                style={{ fontSize: '0.8rem', padding: '6px 12px', marginBottom: '8px' }}
+              >
+                テストケースを生成
+              </button>
+            )}
+
+            {showButtons && entry.items.length > 0 && (
+              <>
+                {showRevisionInput && (
+                  <div style={{ marginBottom: '8px' }}>
+                    <textarea
+                      className="instruction-textarea"
+                      value={revisionText}
+                      onChange={e => setRevisionText(e.target.value)}
+                      placeholder="修正してほしい内容を入力してください..."
+                      style={{ minHeight: '70px', fontSize: '0.82rem' }}
+                      autoFocus
+                    />
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                      <button
+                        className="btn-primary"
+                        disabled={!revisionText.trim()}
+                        onClick={() => handleRevisionRequest(revisionText.trim())}
+                        style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                      >
+                        送信
+                      </button>
+                      <button
+                        className="btn-secondary"
+                        onClick={() => { setShowRevisionInput(false); setRevisionText('') }}
+                        style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                      >
+                        キャンセル
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn-primary"
+                    onClick={() => handleApproveTestCases(entry.items)}
+                    style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                  >
+                    承認してテスト実行
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={() => { setShowRevisionInput(prev => !prev); setRevisionText('') }}
+                    style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                  >
+                    修正を依頼
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )
+      }
+
+      case 'test_running':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '10px 12px',
+            fontSize: '0.82rem',
+            color: '#93c5fd',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <span className="spinner" style={{ width: '12px', height: '12px', marginRight: 0 }} />
+            {entry.label}
+          </div>
+        )
+
+      case 'test_done': {
+        const resultColor = entry.passed ? '#86efac' : '#fca5a5'
+        const resultBg = entry.passed ? '#052e16' : '#450a0a'
+        const resultBorder = entry.passed ? '#16a34a' : '#dc2626'
+        return (
+          <div key={idx} style={{
+            background: resultBg,
+            border: `1px solid ${resultBorder}`,
+            borderRadius: '6px',
+            padding: '10px 12px',
+            fontSize: '0.82rem',
+          }}>
+            <div style={{ color: resultColor, fontWeight: 600, marginBottom: entry.items.length > 0 ? '8px' : 0 }}>
+              {entry.passed ? '✅' : '❌'} {entry.summary || (entry.passed ? 'テスト合格' : 'テスト失敗')}
+            </div>
+            {entry.items.length > 0 && (
+              <div style={{ overflowX: 'auto', maxHeight: '160px', overflowY: 'auto' }}>
+                <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.72rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                      <th style={{ padding: '3px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>ID</th>
+                      <th style={{ padding: '3px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>テスト項目</th>
+                      <th style={{ padding: '3px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>期待出力</th>
+                      <th style={{ padding: '3px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>実際の出力</th>
+                      <th style={{ padding: '3px 6px', textAlign: 'center', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>判定</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {entry.items.map((tc) => {
+                      const r = tc.latest_result
+                      const verdictIcon: Record<string, string> = { PASSED: '✅', FAILED: '❌', ERROR: '⚠️', SKIPPED: '⏭️' }
+                      const icon = r?.verdict ? (verdictIcon[r.verdict] ?? r.verdict) : '—'
+                      return (
+                        <tr key={tc.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                          <td style={{ padding: '3px 6px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
+                          <td style={{ padding: '3px 6px', color: '#cbd5e1' }}>{tc.test_item}</td>
+                          <td style={{ padding: '3px 6px', color: '#94a3b8' }}>{tc.expected_output ?? '—'}</td>
+                          <td style={{ padding: '3px 6px', color: '#94a3b8' }}>{r?.actual_output ?? '—'}</td>
+                          <td style={{ padding: '3px 6px', textAlign: 'center', whiteSpace: 'nowrap' }}>{icon} {r?.verdict ?? '未実行'}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )
+      }
+
+      case 'review': {
+        const isLastActive = idx === lastUnresolvedReviewIdx
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: `1px solid ${entry.resolved ? '#334155' : '#facc15'}`,
+            borderRadius: '6px',
+            padding: '12px',
+            fontSize: '0.82rem',
+          }}>
+            <div style={{ color: entry.resolved ? '#64748b' : '#facc15', fontSize: '0.72rem', marginBottom: '8px', fontWeight: 600 }}>
+              実装確認 {entry.resolved ? '(完了)' : '— テスト完了。実装を確認してください'}
+            </div>
+            <div style={{
+              background: '#1e293b',
+              borderRadius: '4px',
+              padding: '8px',
+              fontSize: '0.78rem',
+              color: '#94a3b8',
+              whiteSpace: 'pre-wrap',
+              maxHeight: '100px',
+              overflowY: 'auto',
+              marginBottom: isLastActive && !entry.resolved ? '10px' : 0,
+            }}>
+              <span style={{ color: '#475569', fontSize: '0.7rem', display: 'block', marginBottom: '4px' }}>実行されたプロンプト</span>
+              {entry.prompt}
+            </div>
+            {isLastActive && !entry.resolved && (
+              <>
+                <p style={{ fontSize: '0.78rem', color: '#64748b', margin: '0 0 8px' }}>
+                  テスト結果と変更内容をログで確認してください。問題なければ「承認」、修正が必要なら「差し戻し」を選択してください。
+                </p>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    className="btn-primary"
+                    onClick={handleApproveImplementation}
+                    disabled={isBusy}
+                    style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                  >
+                    承認
+                  </button>
+                  <button
+                    className="btn-danger"
+                    onClick={handleRejectImplementation}
+                    disabled={isBusy}
+                    style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                  >
+                    差し戻し
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )
+      }
+
+      case 'error':
+        return (
+          <div key={idx} style={{
+            background: '#450a0a',
+            border: '1px solid #dc2626',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            fontSize: '0.82rem',
+            color: '#fca5a5',
+          }}>
+            ❌ {entry.message}
+          </div>
+        )
+
+      case 'info':
+        return (
+          <div key={idx} style={{
+            background: '#1e293b',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '8px 12px',
+            fontSize: '0.82rem',
+            color: '#94a3b8',
+            fontStyle: 'italic',
+          }}>
+            {entry.message}
+          </div>
+        )
+
+      default:
+        return null
+    }
+  }
+
+  function renderInputArea() {
+    const isClarifyMode = chatEntries.length > 0 &&
+      chatEntries[chatEntries.length - 1].type === 'clarify_question'
+    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
+    const canSend = !isBusy && instruction.trim().length > 0 && task?.status === 'idle'
+
+    return (
+      <div style={{
+        borderTop: '1px solid #1e293b',
+        padding: '10px 12px',
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        background: '#0a0f1e',
+      }}>
+        <textarea
+          className="instruction-textarea"
+          value={instruction}
+          onChange={e => setInstruction(e.target.value)}
+          placeholder={isClarifyMode ? '回答を入力... (Enter で送信)' : '指示を入力してください...'}
+          disabled={isBusy || task?.status !== 'idle'}
+          onKeyDown={e => {
+            if (isClarifyMode && e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              handleSendClarifyAnswer()
+            }
+          }}
+          style={{ minHeight: '72px', marginBottom: 0, resize: 'vertical' }}
+        />
+        <div className="instruction-footer" style={{ margin: 0 }}>
+          {isClarifyMode ? (
+            <>
+              <button className="btn-primary" onClick={handleSendClarifyAnswer} disabled={!canSend}>
+                回答を送信
+              </button>
+              <button className="btn-secondary" onClick={handleSkipClarify} disabled={isBusy}>
+                スキップしてプロンプトを生成
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn-primary" onClick={handleStartClarify} disabled={!canSend}>
+                要件を確認する
+              </button>
+              <button className="btn-secondary" onClick={handleGeneratePrompt} disabled={!canSend}>
+                スキップしてプロンプトを生成
+              </button>
+            </>
+          )}
+          {task?.status !== 'idle' && statusMessage && (
+            <span className="instruction-status">{statusMessage}</span>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   const showStopButton =
     task && (task.status === 'running' || task.status === 'idle' || task.status === 'testing')
@@ -1036,18 +1677,20 @@ export default function TaskDetail() {
           {/* Vertical resize handle */}
           <div className="resize-handle-vertical" onMouseDown={handleResizeStart} />
 
-          {/* Right: Instruction Input Panel */}
-          <div className="instruction-panel" style={{ flex: 1, minWidth: 0 }}>
+          {/* Right: Instruction Chat Panel */}
+          <div className="instruction-panel" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: 0 }}>
 
             {/* Step progress bar */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
               gap: 0,
-              marginBottom: '12px',
+              padding: '10px 16px',
+              borderBottom: '1px solid #e2e8f0',
               flexShrink: 0,
               flexWrap: 'wrap',
               rowGap: '4px',
+              background: '#0a0f1e',
             }}>
               {steps.map((step, idx) => {
                 const isClickable = !step.future
@@ -1098,551 +1741,37 @@ export default function TaskDetail() {
                     >
                       <span>{icon}</span>
                       <span>{step.label}</span>
+                      {step.resultLabel && (
+                        <span style={{ fontSize: '0.7rem', opacity: 0.85 }}>({step.resultLabel})</span>
+                      )}
                     </button>
                   </div>
                 )
               })}
             </div>
 
-            {promptState === 'idle' && (
-              <>
-                <p className="instruction-panel-title">Claudeへの指示</p>
-                <textarea
-                  className="instruction-textarea"
-                  value={instruction}
-                  onChange={e => setInstruction(e.target.value)}
-                  placeholder={'指示を入力してください...\n例: シンプルな翻訳アプリを作ってください'}
-                  disabled={streaming || task.status !== 'idle'}
-                />
-                <div className="instruction-footer">
-                  <button
-                    className="btn-primary"
-                    onClick={handleStartClarify}
-                    disabled={!canGenerate}
-                  >
-                    要件を確認する
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    onClick={handleGeneratePrompt}
-                    disabled={!canGenerate}
-                  >
-                    スキップしてプロンプトを生成
-                  </button>
-                  {(streaming || task.status !== 'idle') && statusMessage && (
-                    <span className="instruction-status">{statusMessage}</span>
-                  )}
+            {/* Chat history viewport */}
+            <div style={{
+              flex: 1,
+              overflowY: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+              padding: '8px 12px',
+              minHeight: 0,
+              background: '#0d1424',
+            }}>
+              {chatEntries.length === 0 && (
+                <div style={{ color: '#475569', fontSize: '0.82rem', margin: 'auto', textAlign: 'center' }}>
+                  <p>指示を入力して開始してください</p>
                 </div>
-              </>
-            )}
+              )}
+              {chatEntries.map((entry, idx) => renderChatEntry(entry, idx))}
+              <div ref={chatEndRef} />
+            </div>
 
-            {promptState === 'clarifying' && (
-              <>
-                <p className="instruction-panel-title">
-                  要件確認
-                  <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 'normal', marginLeft: '8px' }}>
-                    — Claudeが不明点を質問します
-                  </span>
-                </p>
-
-                {/* Chat history */}
-                <div style={{
-                  flex: 1,
-                  overflowY: 'auto',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '8px',
-                  marginBottom: '8px',
-                  minHeight: 0,
-                }}>
-                  {/* Original instruction */}
-                  <div style={{
-                    background: '#1e293b',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '8px 12px',
-                    fontSize: '0.82rem',
-                    color: '#64748b',
-                  }}>
-                    <span style={{ color: '#475569', fontSize: '0.72rem' }}>指示: </span>
-                    {instruction}
-                  </div>
-
-                  {clarifyHistory.map((msg, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        background: msg.role === 'assistant' ? '#0f172a' : '#1e3a5f',
-                        border: `1px solid ${msg.role === 'assistant' ? '#334155' : '#2563eb'}`,
-                        borderRadius: '6px',
-                        padding: '8px 12px',
-                        fontSize: '0.82rem',
-                        color: msg.role === 'assistant' ? '#e2e8f0' : '#bfdbfe',
-                        whiteSpace: 'pre-wrap',
-                        lineHeight: 1.6,
-                      }}
-                    >
-                      <span style={{ fontSize: '0.72rem', color: msg.role === 'assistant' ? '#6366f1' : '#60a5fa', marginBottom: '4px', display: 'block' }}>
-                        {msg.role === 'assistant' ? 'Claude' : 'あなた'}
-                      </span>
-                      {msg.content}
-                    </div>
-                  ))}
-
-                  {/* Streaming response */}
-                  {clarifying && (
-                    <div style={{
-                      background: '#0f172a',
-                      border: '1px solid #334155',
-                      borderRadius: '6px',
-                      padding: '8px 12px',
-                      fontSize: '0.82rem',
-                      color: '#94a3b8',
-                      whiteSpace: 'pre-wrap',
-                      lineHeight: 1.6,
-                    }}>
-                      <span style={{ fontSize: '0.72rem', color: '#6366f1', marginBottom: '4px', display: 'block' }}>Claude</span>
-                      {clarifyStreamText || '考え中...'}
-                    </div>
-                  )}
-                </div>
-
-                {/* Answer input — only show if Claude has already asked a question */}
-                {clarifyHistory.length > 0 && clarifyHistory[clarifyHistory.length - 1].role === 'assistant' && !clarifying && (
-                  <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexShrink: 0 }}>
-                    <textarea
-                      className="instruction-textarea"
-                      value={clarifyInput}
-                      onChange={e => setClarifyInput(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault()
-                          handleSendClarifyAnswer()
-                        }
-                      }}
-                      placeholder="回答を入力してください... (Enter で送信)"
-                      style={{ flex: 1, minHeight: '60px', marginBottom: 0 }}
-                      disabled={clarifying}
-                    />
-                  </div>
-                )}
-
-                <div className="instruction-footer" style={{ flexShrink: 0 }}>
-                  {clarifyHistory.length > 0 && clarifyHistory[clarifyHistory.length - 1].role === 'assistant' && !clarifying && (
-                    <button
-                      className="btn-primary"
-                      onClick={handleSendClarifyAnswer}
-                      disabled={!clarifyInput.trim() || clarifying}
-                    >
-                      回答を送信
-                    </button>
-                  )}
-                  <button
-                    className="btn-secondary"
-                    onClick={handleSkipClarify}
-                    disabled={clarifying}
-                  >
-                    スキップしてプロンプトを生成
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    onClick={handleCancelClarify}
-                    disabled={clarifying}
-                  >
-                    キャンセル
-                  </button>
-                </div>
-              </>
-            )}
-
-            {promptState === 'generating' && (
-              <>
-                <p className="instruction-panel-title">
-                  <span className="spinner" style={{ marginRight: '8px' }} />
-                  AIがプロンプトを生成しています...
-                </p>
-                <div
-                  style={{
-                    background: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '12px',
-                    fontFamily: 'monospace',
-                    fontSize: '0.82rem',
-                    color: '#94a3b8',
-                    minHeight: '100px',
-                    maxHeight: '200px',
-                    overflowY: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {generatedPrompt || '生成中...'}
-                </div>
-              </>
-            )}
-
-            {(promptState === 'test_cases' || promptState === 'running_tests') && (
-              <>
-                <p className="instruction-panel-title">
-                  テストケース確認
-                  <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 'normal', marginLeft: '8px' }}>
-                    — 承認後にテストコードを生成・実行します
-                  </span>
-                </p>
-
-                {generatingTestCases ? (
-                  <div style={{
-                    background: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '12px',
-                    fontFamily: 'monospace',
-                    fontSize: '0.82rem',
-                    color: '#94a3b8',
-                    flex: 1,
-                    overflowY: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    lineHeight: 1.5,
-                    minHeight: 0,
-                  }}>
-                    {generatedTestCases || 'テストケースを生成中...'}
-                  </div>
-                ) : testCaseItems.length > 0 ? (
-                  <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-                    <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.78rem' }}>
-                      <thead>
-                        <tr style={{ borderBottom: '1px solid #334155', background: '#0f172a' }}>
-                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>ID</th>
-                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>対象画面</th>
-                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>テスト項目</th>
-                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>操作（入力値）</th>
-                          <th style={{ padding: '6px 8px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>期待出力</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {testCaseItems.map((tc) => (
-                          <tr key={tc.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                            <td style={{ padding: '5px 8px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
-                            <td style={{ padding: '5px 8px', color: '#94a3b8', whiteSpace: 'nowrap' }}>{tc.target_screen ?? '—'}</td>
-                            <td style={{ padding: '5px 8px', color: '#cbd5e1' }}>{tc.test_item}</td>
-                            <td style={{ padding: '5px 8px', color: '#94a3b8', fontSize: '0.75rem' }}>{tc.operation ?? '—'}</td>
-                            <td style={{ padding: '5px 8px', color: '#94a3b8', fontSize: '0.75rem' }}>{tc.expected_output ?? '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', color: '#475569', fontSize: '0.85rem' }}>
-                    <span>テストケースがまだ生成されていません</span>
-                    {confirmedPrompt && (
-                      <button
-                        className="btn-primary"
-                        onClick={() => {
-                          setGeneratedTestCases('')
-                          setEditableTestCases('')
-                          setGeneratingTestCases(true)
-                          generateTestCasesStream(
-                            taskId,
-                            confirmedPrompt,
-                            (chunk) => setGeneratedTestCases(prev => prev + chunk),
-                            async () => {
-                              setGeneratingTestCases(false)
-                              try {
-                                const items = await getTestCaseItems(taskId)
-                                setTestCaseItems(items)
-                              } catch { /* ignore */ }
-                            },
-                            (err) => {
-                              setGeneratingTestCases(false)
-                              alert(`テストケース生成エラー: ${err}`)
-                            }
-                          )
-                        }}
-                      >
-                        テストケースを生成
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {!generatingTestCases && !runningTests && testCaseItems.length > 0 && (
-                  <p style={{ fontSize: '0.75rem', color: '#64748b', margin: '0 0 6px', flexShrink: 0 }}>
-                    {testCaseItems.length} 件のテストケースが生成されました。承認するとテストコードを生成・実行します。
-                  </p>
-                )}
-
-                {showRevisionInput && (
-                  <div style={{ marginBottom: '8px' }}>
-                    <textarea
-                      className="instruction-textarea"
-                      value={revisionText}
-                      onChange={e => setRevisionText(e.target.value)}
-                      placeholder="修正してほしい内容を入力してください..."
-                      style={{ minHeight: '80px', fontSize: '0.82rem' }}
-                      autoFocus
-                    />
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
-                      <button
-                        className="btn-primary"
-                        disabled={!revisionText.trim()}
-                        onClick={() => {
-                          const feedback = revisionText.trim()
-                          setRevisionText('')
-                          setShowRevisionInput(false)
-                          setGeneratedTestCases('')
-                          setEditableTestCases('')
-                          setGeneratingTestCases(true)
-                          generateTestCasesStream(
-                            taskId,
-                            confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + feedback,
-                            (chunk) => setGeneratedTestCases(prev => prev + chunk),
-                            async () => {
-                              setGeneratingTestCases(false)
-                              try {
-                                const items = await getTestCaseItems(taskId)
-                                setTestCaseItems(items)
-                              } catch { /* ignore */ }
-                            },
-                            (err) => {
-                              setGeneratingTestCases(false)
-                              alert(`テストケース再生成エラー: ${err}`)
-                            }
-                          )
-                        }}
-                      >
-                        送信
-                      </button>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => { setShowRevisionInput(false); setRevisionText('') }}
-                      >
-                        キャンセル
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="instruction-footer">
-                  <button
-                    className="btn-primary"
-                    onClick={handleApproveTestCases}
-                    disabled={generatingTestCases || runningTests || testCaseItems.length === 0}
-                  >
-                    {runningTests ? 'テスト実行中...' : '承認してテスト実行'}
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    onClick={() => { setShowRevisionInput(prev => !prev); setRevisionText('') }}
-                    disabled={generatingTestCases || runningTests}
-                  >
-                    修正を依頼
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    onClick={() => { setPromptState('idle'); setGeneratedTestCases(''); setEditableTestCases('') }}
-                    disabled={generatingTestCases || runningTests}
-                  >
-                    スキップ
-                  </button>
-                </div>
-              </>
-            )}
-
-            {promptState === 'reviewing' && (
-              <>
-                <p className="instruction-panel-title">
-                  実装確認
-                  <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 'normal', marginLeft: '8px' }}>
-                    — テスト完了。実装を確認してください
-                  </span>
-                </p>
-
-                <div style={{
-                  background: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: '6px',
-                  padding: '12px',
-                  fontSize: '0.82rem',
-                  color: '#94a3b8',
-                  marginBottom: '8px',
-                }}>
-                  <p style={{ margin: '0 0 8px', color: '#6366f1', fontSize: '0.75rem' }}>実行されたプロンプト</p>
-                  <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1' }}>{confirmedPrompt}</div>
-                </div>
-
-                <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '12px', fontSize: '0.82rem', color: '#94a3b8', flex: 1, marginBottom: '8px' }}>
-                  <p style={{ margin: '0 0 4px', color: '#6366f1', fontSize: '0.75rem' }}>承認済みテストケース</p>
-                  <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1', overflowY: 'auto', maxHeight: '200px' }}>{editableTestCases}</div>
-                </div>
-
-                {testResultSummary && (
-                  <div style={{
-                    background: testPassed === false ? '#450a0a' : '#052e16',
-                    border: `1px solid ${testPassed === false ? '#dc2626' : '#16a34a'}`,
-                    borderRadius: '6px',
-                    padding: '10px 14px',
-                    marginBottom: '8px',
-                    fontSize: '0.85rem',
-                    color: '#f1f5f9',
-                    fontWeight: 600,
-                  }}>
-                    {testPassed === false ? '❌' : '✅'} {testResultSummary}
-                  </div>
-                )}
-
-                {testCaseItems.length > 0 && (
-                  <div style={{
-                    background: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '10px 12px',
-                    marginBottom: '8px',
-                    overflowX: 'auto',
-                    flex: 1,
-                    minHeight: 0,
-                  }}>
-                    <p style={{ margin: '0 0 6px', color: '#6366f1', fontSize: '0.75rem' }}>テスト結果集計表</p>
-                    <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
-                      <thead>
-                        <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
-                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>ID</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>テスト項目</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>期待出力</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500 }}>実際の出力</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'center', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>判定</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'left', color: '#94a3b8', fontWeight: 500, whiteSpace: 'nowrap' }}>実行日時</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {testCaseItems.map((tc) => {
-                          const r = tc.latest_result
-                          const verdictIcon: Record<string, string> = { PASSED: '✅', FAILED: '❌', ERROR: '⚠️', SKIPPED: '⏭️' }
-                          const icon = r?.verdict ? (verdictIcon[r.verdict] ?? r.verdict) : '—'
-                          const executedAt = r ? new Date(r.executed_at).toLocaleString('ja-JP', { hour12: false }) : '—'
-                          return (
-                            <tr key={tc.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                              <td style={{ padding: '4px 6px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
-                              <td style={{ padding: '4px 6px', color: '#cbd5e1' }}>{tc.test_item}</td>
-                              <td style={{ padding: '4px 6px', color: '#94a3b8', fontSize: '0.72rem' }}>{tc.expected_output ?? '—'}</td>
-                              <td style={{ padding: '4px 6px', color: '#94a3b8', fontSize: '0.72rem' }}>{r?.actual_output ?? '—'}</td>
-                              <td style={{ padding: '4px 6px', textAlign: 'center', whiteSpace: 'nowrap' }}>{icon} {r?.verdict ?? '未実行'}</td>
-                              <td style={{ padding: '4px 6px', color: '#64748b', whiteSpace: 'nowrap' }}>{executedAt}</td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                <p style={{ fontSize: '0.8rem', color: '#64748b', margin: '0 0 8px' }}>
-                  テスト結果と変更内容をログで確認してください。問題なければ「承認」、修正が必要なら「差し戻し」を選択してください。
-                </p>
-
-                <div className="instruction-footer">
-                  <button
-                    className="btn-primary"
-                    onClick={handleApproveImplementation}
-                  >
-                    承認
-                  </button>
-                  <button
-                    className="btn-danger"
-                    onClick={handleRejectImplementation}
-                  >
-                    差し戻し
-                  </button>
-                </div>
-              </>
-            )}
-
-            {promptState === 'confirming' && (
-              <>
-                <p className="instruction-panel-title">プロンプト確認</p>
-
-                <div style={{ marginBottom: '8px' }}>
-                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>
-                    元の指示
-                  </p>
-                  <div
-                    style={{
-                      background: '#1e293b',
-                      border: '1px solid #334155',
-                      borderRadius: '6px',
-                      padding: '8px 12px',
-                      fontSize: '0.85rem',
-                      color: '#64748b',
-                    }}
-                  >
-                    {instruction}
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, marginBottom: '8px' }}>
-                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px', flexShrink: 0 }}>
-                    生成されたプロンプト
-                  </p>
-                  <div
-                    style={{
-                      background: '#0f172a',
-                      border: '1px solid #6366f1',
-                      borderRadius: '6px',
-                      padding: '12px',
-                      fontFamily: 'monospace',
-                      fontSize: '0.82rem',
-                      color: '#e2e8f0',
-                      flex: 1,
-                      overflowY: 'auto',
-                      whiteSpace: 'pre-wrap',
-                      lineHeight: 1.5,
-                      minHeight: 0,
-                    }}
-                  >
-                    {generatedPrompt}
-                  </div>
-                </div>
-
-                <div style={{ marginBottom: '8px' }}>
-                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>
-                    このプロンプトへの指摘・追加要望（任意）
-                  </p>
-                  <textarea
-                    className="instruction-textarea"
-                    value={feedback}
-                    onChange={e => setFeedback(e.target.value)}
-                    placeholder="例: エラーメッセージの表示場所も指定してほしい"
-                    rows={2}
-                    style={{ marginBottom: 0 }}
-                  />
-                </div>
-
-                <div className="instruction-footer">
-                  <button
-                    className="btn-primary"
-                    onClick={handleConfirmAndExecute}
-                    disabled={streaming || !generatedPrompt}
-                  >
-                    確定して実行
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    onClick={handleRegenerate}
-                    disabled={generating}
-                  >
-                    {generating ? '生成中...' : '再生成'}
-                  </button>
-                  <button
-                    className="btn-secondary"
-                    onClick={handleCancelConfirm}
-                    disabled={generating}
-                  >
-                    キャンセル
-                  </button>
-                </div>
-              </>
-            )}
+            {/* Fixed input area */}
+            {renderInputArea()}
           </div>
         </div>
       </div>
