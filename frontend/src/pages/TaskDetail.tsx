@@ -654,10 +654,19 @@ export default function TaskDetail() {
           return [...prev, { type: 'test_cases_generating' }]
         })
 
+        streamKeyRef.current += 1
+        const tcStreamKey = `stream-${streamKeyRef.current}`
+        setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
         await generateTestCasesStream(
           taskId,
           prompt,
-          (_chunk) => { /* streaming to log viewer via WebSocket */ },
+          (chunk) => {
+            setLogEntries(prev => prev.map(entry =>
+              entry.kind === 'stream' && entry.key === tcStreamKey
+                ? { ...entry, text: entry.text + chunk }
+                : entry
+            ))
+          },
           async () => {
             setGeneratingTestCases(false)
             try {
@@ -812,10 +821,19 @@ export default function TaskDetail() {
       streamingEntryIndexRef.current = prev.length
       return [...prev, { type: 'test_cases_generating' }]
     })
+    streamKeyRef.current += 1
+    const tcStreamKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
     await generateTestCasesStream(
       taskId,
       confirmedPrompt,
-      (_chunk) => {},
+      (chunk) => {
+        setLogEntries(prev => prev.map(entry =>
+          entry.kind === 'stream' && entry.key === tcStreamKey
+            ? { ...entry, text: entry.text + chunk }
+            : entry
+        ))
+      },
       async () => {
         setGeneratingTestCases(false)
         try {
@@ -874,10 +892,19 @@ export default function TaskDetail() {
       streamingEntryIndexRef.current = prev.length
       return [...prev, { type: 'test_cases_generating' }]
     })
+    streamKeyRef.current += 1
+    const tcStreamKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
     await generateTestCasesStream(
       taskId,
       confirmedPrompt + '\n\n## 前回のテストケースへの指摘\n' + revisionFeedback,
-      (_chunk) => {},
+      (chunk) => {
+        setLogEntries(prev => prev.map(entry =>
+          entry.kind === 'stream' && entry.key === tcStreamKey
+            ? { ...entry, text: entry.text + chunk }
+            : entry
+        ))
+      },
       async () => {
         setGeneratingTestCases(false)
         try {
