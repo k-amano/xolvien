@@ -595,10 +595,38 @@ README:
         task_id: int,
         implementation_prompt: str,
     ) -> AsyncGenerator[str, None]:
+        """Generate unit test code, run tests, auto-fix up to 3 times."""
+        async for chunk in self._run_tests(db, task_id, implementation_prompt, TestType.UNIT):
+            yield chunk
+
+    async def run_integration_tests(
+        self,
+        db: AsyncSession,
+        task_id: int,
+        implementation_prompt: str,
+    ) -> AsyncGenerator[str, None]:
+        """Generate integration test code, start server/DB, run tests, auto-fix up to 3 times."""
+        async for chunk in self._run_tests(db, task_id, implementation_prompt, TestType.INTEGRATION):
+            yield chunk
+
+    async def _run_tests(
+        self,
+        db: AsyncSession,
+        task_id: int,
+        implementation_prompt: str,
+        test_type: TestType,
+    ) -> AsyncGenerator[str, None]:
         """
-        Generate test code from approved test_case_items, run tests, auto-fix up to 3 times.
+        Shared implementation for unit and integration tests.
+        Generates test code, executes tests, auto-fixes up to 3 times.
         Saves TestRun and TestCaseResult records. Streams progress logs.
         """
+        is_integration = test_type == TestType.INTEGRATION
+        tag = "[ITEST]" if is_integration else "[TEST]"
+        report_suffix = "integration" if is_integration else "unit"
+        report_title = "結合テスト" if is_integration else "単体テスト"
+        commit_prefix = "test(integration)" if is_integration else "test"
+
         result = await db.execute(sa_select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
@@ -612,25 +640,23 @@ README:
         )
         tc_items = tc_result.scalars().all()
         if not tc_items:
-            yield "[TEST] ⚠️ テストケースが登録されていません。先にテストケースを生成・承認してください。\n"
+            yield f"{tag} ⚠️ テストケースが登録されていません。先にテストケースを生成・承認してください。\n"
             return
 
         task.status = TaskStatus.TESTING
         await db.commit()
 
-        # Create TestRun record
         test_run = TestRun(
             task_id=task_id,
-            test_type=TestType.UNIT,
+            test_type=test_type,
             started_at=datetime.utcnow(),
         )
         db.add(test_run)
         await db.commit()
         await db.refresh(test_run)
 
-        yield "[TEST] テストコードを生成しています...\n"
+        yield f"{tag} テストコードを生成しています...\n"
 
-        # Build test case summary for Claude
         tc_summary_lines = []
         for tc in tc_items:
             tc_summary_lines.append(
@@ -644,7 +670,65 @@ README:
             "/workspace",
         )
 
-        gen_prompt = f"""あなたはテストコード生成の専門家です。以下の手順をすべて実行してください。
+        xolvien_result_instruction = """
+   **重要: 各テストケースは必ず以下のパターンで実際の出力値を `console.log` で出力すること**
+
+   Jest（Node.js）の場合の例:
+   ```javascript
+   test('TC-001: テスト名', () => {{
+     const actual = /* 実際の値 */;
+     console.log('XOLVIEN_RESULT:' + JSON.stringify({{tc_id: 'TC-001', actual: String(actual)}}));
+     expect(actual).toBe(/* 期待値 */);
+   }});
+   ```
+
+   pytest（Python）の場合の例:
+   ```python
+   import json
+   def test_tc001_xxx():
+       actual = /* 実際の値 */
+       print('XOLVIEN_RESULT:' + json.dumps({{'tc_id': 'TC-001', 'actual': str(actual)}}))
+       assert actual == /* 期待値 */
+   ```"""
+
+        if is_integration:
+            gen_prompt = f"""あなたは結合テストコード生成の専門家です。以下の手順をすべて実行してください。
+
+## 実装内容
+{implementation_prompt}
+
+## 承認済みテストケース一覧
+各テストケースの function_name で関数を生成し、操作と期待出力に基づいてテストコードを書いてください。
+
+{tc_summary}
+
+## プロジェクトのファイル一覧
+{file_list.strip()}
+
+## 実行手順（順番通りに行うこと）
+
+1. `package.json` や `pyproject.toml`、`requirements*.txt` を読み込み、テストフレームワークとアプリの起動方法を特定してください
+2. 既存のテストファイルがあれば確認し、命名規則・構造に従ってください
+3. **APIサーバーとDBをバックグラウンドで起動してから**テストを実行する準備をしてください
+   - Node.js の場合: `npm start &` や `node server.js &` などでサーバーを起動し、起動待ちを行うこと
+   - Python の場合: `uvicorn app:app &` や `flask run &` などでサーバーを起動すること
+   - DB が必要な場合: テスト用DB接続文字列をセットアップすること
+   - サーバーの起動確認: `curl` や `wget` でヘルスチェックエンドポイントに到達できることを確認すること
+4. テストケース一覧の全ケースについて、指定された function_name で関数を生成してください
+   - 実際の HTTP リクエスト（axios, requests, fetch, httpx 等）を使ってAPIを呼び出すこと
+   - DBの状態確認が必要な場合は実際のDB接続を使うこと
+{xolvien_result_instruction}
+5. テストの実行に必要な依存パッケージをインストールしてください（supertest, axios, httpx, pytest-httpx 等）
+6. テストを実行してください
+
+注意:
+- function_name は変更しないこと（DBでの結果照合に使用する）
+- `XOLVIEN_RESULT:` の出力は `expect/assert` より前に行うこと
+- 記録する `actual` は文字列に変換すること
+- テスト終了後にバックグラウンドで起動したサーバーを停止すること
+"""
+        else:
+            gen_prompt = f"""あなたはテストコード生成の専門家です。以下の手順をすべて実行してください。
 
 ## 実装内容
 {implementation_prompt}
@@ -662,30 +746,7 @@ README:
 1. `package.json` や `pyproject.toml`、`requirements*.txt` を読み込み、テストフレームワーク（Jest, pytest 等）を特定してください
 2. 既存のテストファイルがあれば確認し、命名規則・構造に従ってください
 3. テストケース一覧の全ケースについて、指定された function_name で関数を生成してください
-
-   **重要: 各テストケースは必ず以下のパターンで実際の出力値を `console.log` で出力すること**
-
-   Jest（Node.js）の場合の例:
-   ```javascript
-   test('TC-001: テスト名', () => {{
-     // テスト実行
-     const actual = /* 実際の値 */;
-     // 結果をconsole.logで出力（expect より前に必ず実行）
-     console.log('XOLVIEN_RESULT:' + JSON.stringify({{tc_id: 'TC-001', actual: String(actual)}}));
-     expect(actual).toBe(/* 期待値 */);
-   }});
-   ```
-
-   pytest（Python）の場合の例:
-   ```python
-   import json
-   def test_tc001_xxx():
-       actual = /* 実際の値 */
-       # 結果をprintで出力（assert より前に必ず実行）
-       print('XOLVIEN_RESULT:' + json.dumps({{'tc_id': 'TC-001', 'actual': str(actual)}}))
-       assert actual == /* 期待値 */
-   ```
-
+{xolvien_result_instruction}
 4. テストの実行に必要な依存パッケージをインストールしてください
 5. テストを実行してください
 
@@ -705,10 +766,9 @@ README:
         ):
             yield chunk
 
-        # Detect test command
         test_command = self._detect_test_command(task.container_id)
         if test_command is None:
-            yield "\n[TEST] テストフレームワークが見つかりません。テストコードを確認してください。\n"
+            yield f"\n{tag} テストフレームワークが見つかりません。テストコードを確認してください。\n"
             test_run.passed = False
             test_run.exit_code = -1
             test_run.error_output = "No test framework detected"
@@ -722,14 +782,13 @@ README:
         test_run.test_command = test_command
         await db.commit()
 
-        yield f"\n[TEST] テストを実行しています: {test_command}\n"
+        yield f"\n{tag} テストを実行しています: {test_command}\n"
 
         max_retries = 3
         passed = False
         last_output = ""
         last_error = ""
 
-        # Pre-create the results file with world-writable permissions so any user can write to it
         self.docker_service.execute_command(
             task.container_id,
             "rm -f /tmp/xolvien_tc_results.jsonl && touch /tmp/xolvien_tc_results.jsonl && chmod 777 /tmp/xolvien_tc_results.jsonl",
@@ -738,7 +797,7 @@ README:
 
         for attempt in range(max_retries + 1):
             if attempt > 0:
-                yield f"\n[TEST] 自動修正 ({attempt}/{max_retries})...\n"
+                yield f"\n{tag} 自動修正 ({attempt}/{max_retries})...\n"
 
                 fix_prompt = f"""テストが失敗しました。原因を特定して修正してください。
 
@@ -773,7 +832,7 @@ README:
                 ):
                     yield chunk
 
-                yield f"\n[TEST] テストを再実行しています...\n"
+                yield f"\n{tag} テストを再実行しています...\n"
 
             exit_code, output, error = self.docker_service.execute_command(
                 task.container_id,
@@ -795,11 +854,10 @@ README:
             test_run.error_output = error
 
             if passed:
-                yield f"\n[TEST] ✅ テストがパスしました\n"
+                yield f"\n{tag} ✅ テストがパスしました\n"
                 break
             else:
-                # Detect infrastructure errors that Claude cannot fix by retrying
-                combined_out = (output + "\n" + error)
+                combined_out = output + "\n" + error
                 infra_error_patterns = [
                     "EACCES", "EPERM", "ENOENT", "ENOSPC",
                     "permission denied", "Permission denied",
@@ -809,17 +867,16 @@ README:
                     (p for p in infra_error_patterns if p in combined_out), None
                 )
                 if infra_error:
-                    yield f"\n[TEST] ⛔ インフラエラーを検出しました（{infra_error}）。自動修正をスキップします。\n"
-                    yield f"[TEST] テストコードまたは環境設定を確認してください。\n"
+                    yield f"\n{tag} ⛔ インフラエラーを検出しました（{infra_error}）。自動修正をスキップします。\n"
+                    yield f"{tag} テストコードまたは環境設定を確認してください。\n"
                     break
 
                 if attempt < max_retries:
-                    yield f"\n[TEST] ❌ テストが失敗しました (試行 {attempt + 1}/{max_retries + 1})\n"
+                    yield f"\n{tag} ❌ テストが失敗しました (試行 {attempt + 1}/{max_retries + 1})\n"
                 else:
-                    yield f"\n[TEST] 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
+                    yield f"\n{tag} 最大リトライ回数 ({max_retries}) に達しました。手動対応が必要です。\n"
 
-        # Parse actual_output values: first try XOLVIEN_RESULT: lines in stdout,
-        # then fall back to /tmp/xolvien_tc_results.jsonl written by appendFileSync
+        # Parse XOLVIEN_RESULT: lines from stdout
         actual_by_tc_id: dict[str, str] = {}
         for line in (last_output + "\n" + last_error).splitlines():
             if "XOLVIEN_RESULT:" not in line:
@@ -853,7 +910,6 @@ README:
         executed_at = datetime.utcnow()
         for tc in tc_items:
             verdict, actual_fallback = self._extract_result_for_function(last_combined, tc.function_name, tc.tc_id)
-            # Prefer actual value from JSONL file; fall back to output parsing for failures
             actual = actual_by_tc_id.get(tc.tc_id) or actual_fallback
             tcr = TestCaseResult(
                 test_case_item_id=tc.id,
@@ -864,9 +920,9 @@ README:
             )
             db.add(tcr)
         await db.commit()
-        yield f"[TEST] テスト結果を {len(tc_items)} 件保存しました\n"
+        yield f"{tag} テスト結果を {len(tc_items)} 件保存しました\n"
 
-        # Compute summary from saved TestCaseResult verdicts (TC件数ベース)
+        # Compute summary from TestCaseResult verdicts (TC件数ベース)
         tc_results_q = await db.execute(
             sa_select(TestCaseResult).where(TestCaseResult.test_run_id == test_run.id)
         )
@@ -885,10 +941,9 @@ README:
 
         now_str = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         executed_at_str = executed_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        report_filename = f"test-report-{now_str}-unit.md"
+        report_filename = f"test-report-{now_str}-{report_suffix}.md"
         report_path = f"/workspace/repo/test-reports/{report_filename}"
 
-        # Build results table from DB records
         tc_result2 = await db.execute(
             sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id).order_by(TestCaseItem.seq_no)
         )
@@ -897,7 +952,6 @@ README:
                        "|---|---|---|---|---|---|"]
         verdict_icon = {Verdict.PASSED: "✅", Verdict.FAILED: "❌", Verdict.ERROR: "⚠️", Verdict.SKIPPED: "⏭️"}
         for tc in tc_items2:
-            # Get latest result for this run
             r_res = await db.execute(
                 sa_select(TestCaseResult)
                 .where(TestCaseResult.test_case_item_id == tc.id)
@@ -912,7 +966,7 @@ README:
             )
         results_table_md = "\n".join(report_rows)
 
-        report_content = f"""# テストレポート（単体テスト）
+        report_content = f"""# テストレポート（{report_title}）
 
 | 項目 | 値 |
 |---|---|
@@ -944,8 +998,7 @@ README:
         test_run.completed_at = datetime.utcnow()
         await db.commit()
 
-        # Commit test code and report
-        commit_msg = f"test: add unit tests ({'pass' if passed else 'fail'})"
+        commit_msg = f"{commit_prefix}: add {report_suffix} tests ({'pass' if passed else 'fail'})"
         self._write_text_to_container(task.container_id, "/tmp/xolvien_commit_msg.txt", commit_msg)
         _, commit_out, _ = self.docker_service.execute_command(
             task.container_id,
@@ -958,7 +1011,7 @@ README:
         task.status = TaskStatus.IDLE
         await db.commit()
 
-        yield f"\n[TEST] レポートを保存しました: {report_path}\n"
+        yield f"\n{tag} レポートを保存しました: {report_path}\n"
         yield f"\n[SYSTEM] テスト完了: {summary}\n"
 
     def _extract_result_for_function(

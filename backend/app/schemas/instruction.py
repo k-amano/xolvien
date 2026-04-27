@@ -15,6 +15,11 @@ class RunUnitTestsRequest(BaseModel):
     implementation_prompt: str
 
 
+class RunIntegrationTestsRequest(BaseModel):
+    """Request schema for running integration tests."""
+    implementation_prompt: str
+
+
 class GeneratePromptRequest(BaseModel):
     """Request schema for prompt generation."""
 

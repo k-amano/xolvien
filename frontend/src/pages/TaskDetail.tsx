@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream, runIntegrationTestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
 import type { TestCaseItem } from '../types'
 
 type ChatEntry =
@@ -151,7 +151,7 @@ export default function TaskDetail() {
   const [steps, setSteps] = useState<StepInfo[]>([
     { id: 'implement',         label: '実装',       status: 'pending' },
     { id: 'unit_test',         label: '単体テスト', status: 'pending' },
-    { id: 'integration_test',  label: '結合テスト',   status: 'pending', future: true },
+    { id: 'integration_test',  label: '結合テスト',   status: 'pending' },
     { id: 'e2e_test',          label: 'E2Eテスト',   status: 'pending', future: true },
     { id: 'review',            label: '実装確認',     status: 'pending' },
   ])
@@ -208,8 +208,9 @@ export default function TaskDetail() {
 
         const hasImpl = !!lastInstruction
         const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
+        const lastIntegration = runs.find(r => r.test_type === 'integration' && r.completed_at)
 
-        if (!hasImpl && !lastUnit) return
+        if (!hasImpl && !lastUnit && !lastIntegration) return
 
         const prompt = lastInstruction?.content ?? ''
         const initialEntries: ChatEntry[] = []
@@ -239,7 +240,17 @@ export default function TaskDetail() {
             items: items,
           })
           if (lastUnit.passed) {
-            initialEntries.push({ type: 'review', prompt, items, resolved: false })
+            if (lastIntegration) {
+              initialEntries.push({
+                type: 'test_done',
+                summary: lastIntegration.summary ?? '',
+                passed: lastIntegration.passed,
+                items: items,
+              })
+              if (lastIntegration.passed) {
+                initialEntries.push({ type: 'review', prompt, items, resolved: false })
+              }
+            }
           } else {
             initialEntries.push({ type: 'test_cases_ready', items, approved: false })
           }
@@ -256,14 +267,22 @@ export default function TaskDetail() {
               return lastUnit.passed
                 ? { ...step, status: 'done_pass', resultLabel: lastUnit.summary ?? undefined }
                 : { ...step, status: 'done_fail', resultLabel: lastUnit.summary ?? undefined }
+            case 'integration_test':
+              if (!lastUnit?.passed) return step
+              if (!lastIntegration) return { ...step, status: 'active' }
+              return lastIntegration.passed
+                ? { ...step, status: 'done_pass', resultLabel: lastIntegration.summary ?? undefined }
+                : { ...step, status: 'done_fail', resultLabel: lastIntegration.summary ?? undefined }
             case 'review':
-              return lastUnit?.passed ? { ...step, status: 'active' } : step
+              return lastIntegration?.passed ? { ...step, status: 'active' } : step
             default:
               return step
           }
         }))
 
-        if (lastUnit?.passed) setSelectedStep('review')
+        if (lastIntegration?.passed) setSelectedStep('review')
+        else if (lastIntegration) setSelectedStep('integration_test')
+        else if (lastUnit?.passed) setSelectedStep('integration_test')
         else if (lastUnit) setSelectedStep('unit_test')
         else if (hasImpl) setSelectedStep('unit_test')
 
@@ -787,17 +806,15 @@ export default function TaskDetail() {
             setTestPassed(lastUnit.passed)
             setSteps(prev => prev.map(s => {
               if (s.id === 'unit_test') return { ...s, status: lastUnit.passed ? 'done_pass' : 'done_fail', resultLabel: lastUnit.summary ?? undefined }
-              if (s.id === 'review') return { ...s, status: 'active' }
+              if (s.id === 'integration_test' && lastUnit.passed) return { ...s, status: 'active' }
               return s
             }))
-            setChatEntries(prev => {
-              const mapped = prev.map((e, i) =>
-                i === streamingEntryIndexRef.current && e.type === 'test_running'
-                  ? { type: 'test_done' as const, summary: lastUnit.summary ?? '', passed: lastUnit.passed, items: freshItems }
-                  : e
-              )
-              return [...mapped, { type: 'review' as const, prompt: confirmedPrompt, items: freshItems, resolved: false }]
-            })
+            if (lastUnit.passed) setSelectedStep('integration_test')
+            setChatEntries(prev => prev.map((e, i) =>
+              i === streamingEntryIndexRef.current && e.type === 'test_running'
+                ? { type: 'test_done' as const, summary: lastUnit.summary ?? '', passed: lastUnit.passed, items: freshItems }
+                : e
+            ))
           }
         } catch { /* ignore */ }
       },
@@ -808,6 +825,110 @@ export default function TaskDetail() {
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'test_running'
             ? { type: 'error', message: `テスト実行エラー: ${err}` }
+            : e
+        ))
+      }
+    )
+  }
+
+  async function handleApproveIntegrationTestCases(items: TestCaseItem[]) {
+    if (items.length === 0 || runningTests) return
+    setRunningTests(true)
+    setRunningTestType('integration')
+    testCountRef.current = { passed: 0, failed: 0 }
+
+    setChatEntries(prev => prev.map(e =>
+      e.type === 'test_cases_ready' && !e.approved ? { ...e, approved: true } : e
+    ))
+
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'test_running', label: '結合テストコードを生成中' }]
+    })
+
+    streamKeyRef.current += 1
+    const currentKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+
+    await runIntegrationTestsStream(
+      taskId,
+      confirmedPrompt,
+      (chunk) => {
+        setLogEntries(prev =>
+          prev.map(entry =>
+            entry.kind === 'stream' && entry.key === currentKey
+              ? { ...entry, text: entry.text + chunk }
+              : entry
+          )
+        )
+        let newLabel: string | null = null
+        if (chunk.includes('[ITEST] テストを実行しています') || chunk.includes('[ITEST] テストを再実行しています')) {
+          testCountRef.current = { passed: 0, failed: 0 }
+          newLabel = '結合テストを実行中 (0件完了)'
+        } else if (chunk.includes('[ITEST] 自動修正')) {
+          const m = chunk.match(/自動修正 \((\d+)\/(\d+)\)/)
+          newLabel = m ? `自動修正中 ${m[1]}/${m[2]}` : '自動修正中'
+        } else {
+          let updated = false
+          for (const line of chunk.split('\n')) {
+            if (/\bPASSED\b/.test(line) || /^\s*✓/.test(line) || /^\s*✔/.test(line)) {
+              testCountRef.current.passed += 1; updated = true
+            } else if (/\bFAILED\b/.test(line) || /^\s*✕/.test(line) || /^\s*✗/.test(line) || /^\s*×/.test(line)) {
+              testCountRef.current.failed += 1; updated = true
+            }
+          }
+          if (updated) {
+            const { passed, failed } = testCountRef.current
+            const total = passed + failed
+            newLabel = failed > 0 ? `結合テストを実行中 (${total}件完了 / ${failed}件失敗)` : `結合テストを実行中 (${total}件完了)`
+          }
+        }
+        if (newLabel) {
+          setTestPhaseLabel(newLabel)
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current && e.type === 'test_running'
+              ? { ...e, label: newLabel! }
+              : e
+          ))
+        }
+      },
+      async () => {
+        setRunningTests(false)
+        setRunningTestType(null)
+        setTestPhaseLabel(null)
+        try {
+          const [runs, freshItems] = await Promise.all([getTestRuns(taskId), getTestCaseItems(taskId)])
+          setTestCaseItems(freshItems)
+          const lastIntegration = runs.find(r => r.test_type === 'integration' && r.completed_at)
+          if (lastIntegration) {
+            setTestResultSummary(lastIntegration.summary ?? null)
+            setTestPassed(lastIntegration.passed)
+            setSteps(prev => prev.map(s => {
+              if (s.id === 'integration_test') return { ...s, status: lastIntegration.passed ? 'done_pass' : 'done_fail', resultLabel: lastIntegration.summary ?? undefined }
+              if (s.id === 'review') return { ...s, status: 'active' }
+              return s
+            }))
+            setChatEntries(prev => {
+              const mapped = prev.map((e, i) =>
+                i === streamingEntryIndexRef.current && e.type === 'test_running'
+                  ? { type: 'test_done' as const, summary: lastIntegration.summary ?? '', passed: lastIntegration.passed, items: freshItems }
+                  : e
+              )
+              if (lastIntegration.passed) {
+                return [...mapped, { type: 'review' as const, prompt: confirmedPrompt, items: freshItems, resolved: false }]
+              }
+              return mapped
+            })
+          }
+        } catch { /* ignore */ }
+      },
+      (err) => {
+        setRunningTests(false)
+        setRunningTestType(null)
+        setTestPhaseLabel(null)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current && e.type === 'test_running'
+            ? { type: 'error', message: `結合テスト実行エラー: ${err}` }
             : e
         ))
       }
@@ -1392,6 +1513,29 @@ export default function TaskDetail() {
       )
     }
 
+    // --- integration_test step selected ---
+    if (effectiveStep === 'integration_test') {
+      // Reuse the same test cases approved for unit test
+      const latestTestCases = chatEntries.reduce<(ChatEntry & { type: 'test_cases_ready' }) | null>(
+        (last, e) => e.type === 'test_cases_ready' ? e as ChatEntry & { type: 'test_cases_ready' } : last, null)
+      if (latestTestCases && latestTestCases.items.length > 0) {
+        return (
+          <div className="instruction-footer" style={{ margin: 0 }}>
+            <button className="btn-primary" onClick={() => handleApproveIntegrationTestCases(latestTestCases.items)} disabled={isBusy}>
+              {runningTests ? '結合テスト実行中...' : '結合テストを実行'}
+            </button>
+          </div>
+        )
+      }
+      return (
+        <div className="instruction-footer" style={{ margin: 0 }}>
+          <span style={{ fontSize: '0.82rem', color: '#475569' }}>
+            先に単体テストを完了してください
+          </span>
+        </div>
+      )
+    }
+
     // --- review step selected ---
     if (effectiveStep === 'review') {
       if (lastUnresolvedReview) {
@@ -1427,8 +1571,8 @@ export default function TaskDetail() {
       background: '#0a0f1e',
     }
 
-    // ── 単体テスト・実装確認フェーズ ──
-    if (selectedStep === 'unit_test' || selectedStep === 'review') {
+    // ── 単体テスト・結合テスト・実装確認フェーズ ──
+    if (selectedStep === 'unit_test' || selectedStep === 'integration_test' || selectedStep === 'review') {
       return (
         <div style={wrapperStyle}>
           <textarea

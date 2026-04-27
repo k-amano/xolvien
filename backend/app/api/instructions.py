@@ -8,7 +8,7 @@ from typing import List
 from app.database import get_db
 from app.models.task import Task
 from app.models.instruction import Instruction, InstructionStatus
-from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest
+from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest, RunIntegrationTestsRequest
 from app.api.auth import verify_token
 from app.services.claude_service import get_claude_service
 
@@ -222,6 +222,42 @@ async def run_unit_tests_stream(
     async def generate():
         try:
             async for chunk in claude_service.run_unit_tests(
+                db, task_id, data.implementation_prompt
+            ):
+                yield chunk
+        except ValueError as e:
+            yield f"[ERROR] {str(e)}\n"
+        except Exception as e:
+            yield f"[ERROR] Unexpected error: {str(e)}\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.post("/run-integration-tests")
+async def run_integration_tests_stream(
+    task_id: int,
+    data: RunIntegrationTestsRequest,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """
+    Generate integration test code from approved test cases, execute tests against
+    a running server + DB, and auto-fix up to 3 times. Streams progress output.
+    """
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    claude_service = get_claude_service()
+
+    async def generate():
+        try:
+            async for chunk in claude_service.run_integration_tests(
                 db, task_id, data.implementation_prompt
             ):
                 yield chunk

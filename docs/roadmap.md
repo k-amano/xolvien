@@ -1,6 +1,6 @@
 # 改修計画
 
-**最終更新**: 2026-04-26
+**最終更新**: 2026-04-27
 
 現在実装済みの機能は `spec.md` を参照。
 
@@ -126,21 +126,17 @@
 
 ---
 
-## フェーズ2: 結合テスト
+## ~~フェーズ2: 結合テスト~~ ✅ 対応済み（2026-04-27）
 
-単体テストと同様の流れで、DB・API 接続を伴うテストを実装する。
-
-**バックエンド:**
-- `claude_service.py` に `run_integration_tests()` を追加
-  - `TestType.INTEGRATION` で `TestRun` を作成
-  - テストコンテナ内で DB や API を起動した状態でテスト実行
-
+- `claude_service.py` に `run_integration_tests()` を追加（`_run_tests()` 共通ヘルパーに `TestType.INTEGRATION` を渡す）
+- `_run_tests()` に結合テスト固有プロンプト（サーバー起動・HTTP リクエストテスト）を追加
 - `instructions.py` に `POST /run-integration-tests` エンドポイントを追加
-
-**フロントエンド:**
-- ステップバーの「結合テスト」ステップをアクティブ化
-- 単体テスト完了後に結合テストへ進むフローを追加
-- `PromptState` に `'running_integration_tests'` を追加
+- `frontend/src/services/api.ts` に `runIntegrationTestsStream()` を追加
+- ステップバーの「結合テスト」ステップをアクティブ化（`future: true` を削除）
+- 単体テスト合格後に自動的に「結合テスト」ステップへ遷移
+- `handleApproveIntegrationTestCases()` ハンドラを追加（`[ITEST]` タグでバナー進捗を追跡）
+- 結合テスト合格後に「実装確認」ステップへ遷移
+- セッション再開時に結合テスト `TestRun` 履歴を DB から復元
 
 ---
 
