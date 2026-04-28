@@ -33,7 +33,7 @@ async def get_test_case_items(
     query = select(TestCaseItem).where(TestCaseItem.task_id == task_id)
     if test_type is not None:
         try:
-            tt = TestType(test_type)
+            tt = TestType(test_type.lower())
         except ValueError:
             raise HTTPException(status_code=422, detail=f"Invalid test_type: {test_type}")
         query = query.where(TestCaseItem.test_type == tt)

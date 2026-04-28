@@ -7,6 +7,7 @@ Create Date: 2026-04-28 00:00:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import ENUM
 
 
 # revision identifiers, used by Alembic.
@@ -15,22 +16,21 @@ down_revision = '36b358383232'
 branch_labels = None
 depends_on = None
 
-testtype_tci = sa.Enum('UNIT', 'INTEGRATION', 'E2E', name='testtype_tci')
+# Reuse the existing 'testtype' enum (already created for test_runs)
+testtype = ENUM('unit', 'integration', 'e2e', name='testtype', create_type=False)
 
 
 def upgrade() -> None:
-    testtype_tci.create(op.get_bind(), checkfirst=True)
     op.add_column(
         'test_case_items',
         sa.Column(
             'test_type',
-            testtype_tci,
+            testtype,
             nullable=False,
-            server_default='UNIT',
+            server_default='unit',
         )
     )
 
 
 def downgrade() -> None:
     op.drop_column('test_case_items', 'test_type')
-    testtype_tci.drop(op.get_bind(), checkfirst=True)

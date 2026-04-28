@@ -1,9 +1,13 @@
 """Test case item model — one row per approved test case (specification level)."""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import ENUM
 from sqlalchemy.orm import relationship
 from app.database import Base
 from app.models.test_run import TestType
+
+# Reuse the existing 'testtype' PostgreSQL enum (shared with test_runs)
+_testtype_pg = ENUM('unit', 'integration', 'e2e', name='testtype', create_type=False)
 
 
 class TestCaseItem(Base):
@@ -13,8 +17,8 @@ class TestCaseItem(Base):
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
     seq_no = Column(Integer, nullable=False)          # 1-based within the task → TC-001
 
-    # Test type: UNIT / INTEGRATION / E2E
-    test_type = Column(Enum(TestType), default=TestType.UNIT, nullable=False)
+    # Test type: unit / integration / e2e — shares the 'testtype' PG enum with test_runs
+    test_type = Column(_testtype_pg, default=TestType.UNIT, nullable=False)
 
     # Specification fields
     target_screen = Column(String(256), nullable=True)   # 対象画面

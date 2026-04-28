@@ -303,8 +303,11 @@ export default function TaskDetail() {
         else if (lastUnit) setSelectedStep('unit_test')
         else if (hasImpl) setSelectedStep('unit_test')
 
-      } catch {
-        // Ignore errors — start fresh
+      } catch (err) {
+        setChatEntries([{
+          type: 'error',
+          message: `セッション復元エラー: ${err instanceof Error ? err.message : String(err)}`,
+        }])
       }
     }
 
