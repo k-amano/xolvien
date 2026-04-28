@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 from app.models.test_case_result import Verdict
+from app.models.test_run import TestType
 
 
 class TestCaseItemResponse(BaseModel):
@@ -10,6 +11,7 @@ class TestCaseItemResponse(BaseModel):
     task_id: int
     seq_no: int
     tc_id: str
+    test_type: TestType = TestType.UNIT
     target_screen: Optional[str]
     test_item: str
     operation: Optional[str]

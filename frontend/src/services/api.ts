@@ -96,8 +96,9 @@ export async function getTestRuns(taskId: number): Promise<TestRun[]> {
   return res.data
 }
 
-export async function getTestCaseItems(taskId: number): Promise<TestCaseItem[]> {
-  const res = await apiClient.get<TestCaseItem[]>(`/api/v1/tasks/${taskId}/test-cases`)
+export async function getTestCaseItems(taskId: number, testType?: 'unit' | 'integration'): Promise<TestCaseItem[]> {
+  const params = testType ? { test_type: testType } : {}
+  const res = await apiClient.get<TestCaseItem[]>(`/api/v1/tasks/${taskId}/test-cases`, { params })
   return res.data
 }
 
@@ -223,6 +224,51 @@ export async function generateTestCasesStream(
   try {
     const response = await fetch(
       `/api/v1/tasks/${taskId}/instructions/generate-test-cases`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${AUTH_TOKEN}`,
+        },
+        body: JSON.stringify({ implementation_prompt: implementationPrompt }),
+      }
+    )
+
+    if (!response.ok) {
+      const text = await response.text()
+      onError(`HTTP ${response.status}: ${text}`)
+      return
+    }
+
+    if (!response.body) {
+      onError('No response body')
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      if (chunk) onChunk(chunk)
+    }
+    onDone()
+  } catch (err) {
+    onError(err instanceof Error ? err.message : String(err))
+  }
+}
+
+export async function generateIntegrationTestCasesStream(
+  taskId: number,
+  implementationPrompt: string,
+  onChunk: (text: string) => void,
+  onDone: () => void,
+  onError: (err: string) => void
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `/api/v1/tasks/${taskId}/instructions/generate-integration-test-cases`,
       {
         method: 'POST',
         headers: {

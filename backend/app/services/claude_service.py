@@ -435,10 +435,12 @@ README:
         db: AsyncSession,
         task_id: int,
         implementation_prompt: str,
+        test_type: TestType = TestType.UNIT,
     ) -> AsyncGenerator[str, None]:
         """
         Generate structured test cases (JSON) from an implementation prompt.
         Saves results to test_case_items table, streams progress to caller.
+        Supports both UNIT and INTEGRATION test types.
         """
         result = await db.execute(sa_select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
@@ -447,13 +449,48 @@ README:
         if not task.container_id:
             raise ValueError("Task has no container")
 
+        is_integration = test_type == TestType.INTEGRATION
+        tag = "[ITEST]" if is_integration else "[TEST]"
+
         _, file_list, _ = self.docker_service.execute_command(
             task.container_id,
             "find /workspace/repo -type f | grep -v '.git' | grep -v '__pycache__' | grep -v 'node_modules' 2>/dev/null || echo '(空)'",
             "/workspace",
         )
 
-        prompt = f"""あなたはテスト設計の専門家です。以下の実装プロンプトとプロジェクトのファイル一覧を参考にして、単体テストのテストケース一覧を生成してください。
+        if is_integration:
+            prompt = f"""あなたは結合テスト設計の専門家です。以下の実装プロンプトとプロジェクトのファイル一覧を参考にして、APIエンドポイント・DB操作・コンポーネント間の連携を検証するテストケースを生成してください。
+
+## 実装予定の内容
+{implementation_prompt}
+
+## プロジェクトのファイル一覧
+{file_list.strip()}
+
+## 出力形式（必ずこの形式のみを出力すること）
+
+```json
+[
+  {{
+    "seq_no": 1,
+    "target_screen": "対象API・コンポーネント名",
+    "test_item": "テスト項目の名称",
+    "operation": "具体的な入力値を含む操作手順（例: POST /api/users に {{\\"name\\": \\"Alice\\"}} を送信する）",
+    "expected_output": "期待される具体的な出力値（例: レスポンスステータス201、DBにユーザーが登録されている）",
+    "function_name": "test_itc001_短い説明（英数字とアンダースコアのみ）"
+  }}
+]
+```
+
+## 注意事項
+- APIエンドポイント・DB操作・コンポーネント間の連携を検証すること
+- 正常系・異常系・境界値を網羅し、各テストケースに具体的な入力値と期待出力値を必ず記述すること
+- function_name は `test_itc{{seq_no:03d}}_` で始まる英数字・アンダースコアのみの関数名にすること
+- JSON以外のテキスト（説明文・Markdownの見出し等）は出力しないこと
+- テストコードは生成しないこと（テストケース定義のみ）
+"""
+        else:
+            prompt = f"""あなたはテスト設計の専門家です。以下の実装プロンプトとプロジェクトのファイル一覧を参考にして、単体テストのテストケース一覧を生成してください。
 
 ## 実装予定の内容
 {implementation_prompt}
@@ -496,15 +533,20 @@ README:
             raw_output += chunk
 
         # Parse JSON and save to test_case_items
-        yield "\n[TEST] テストケースをDBに保存しています...\n"
+        yield f"\n{tag} テストケースをDBに保存しています...\n"
         try:
             items = self._parse_test_cases_json(raw_output)
             if not items:
-                yield "[TEST] ⚠️ テストケースのJSON解析に失敗しました。出力を確認してください。\n"
+                yield f"{tag} ⚠️ テストケースのJSON解析に失敗しました。出力を確認してください。\n"
                 return
 
-            # Delete previous test_case_items for this task (regeneration)
-            existing = await db.execute(sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id))
+            # Delete previous test_case_items of this test_type only (keep other types)
+            existing = await db.execute(
+                sa_select(TestCaseItem).where(
+                    TestCaseItem.task_id == task_id,
+                    TestCaseItem.test_type == test_type,
+                )
+            )
             for item in existing.scalars().all():
                 await db.delete(item)
             await db.commit()
@@ -512,6 +554,7 @@ README:
             for item_data in items:
                 tc = TestCaseItem(
                     task_id=task_id,
+                    test_type=test_type,
                     seq_no=item_data["seq_no"],
                     target_screen=item_data.get("target_screen"),
                     test_item=item_data["test_item"],
@@ -521,9 +564,9 @@ README:
                 )
                 db.add(tc)
             await db.commit()
-            yield f"[TEST] ✅ {len(items)} 件のテストケースを保存しました\n"
+            yield f"{tag} ✅ {len(items)} 件のテストケースを保存しました\n"
         except Exception as e:
-            yield f"[TEST] ⚠️ テストケース保存エラー: {e}\n"
+            yield f"{tag} ⚠️ テストケース保存エラー: {e}\n"
 
     def _parse_test_cases_json(self, raw: str) -> list[dict]:
         """Extract and parse the JSON array from Claude's output."""
@@ -634,9 +677,12 @@ README:
         if not task.container_id:
             raise ValueError("Task has no container")
 
-        # Load approved test case items from DB
+        # Load approved test case items from DB (filtered by test_type)
         tc_result = await db.execute(
-            sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id).order_by(TestCaseItem.seq_no)
+            sa_select(TestCaseItem).where(
+                TestCaseItem.task_id == task_id,
+                TestCaseItem.test_type == test_type,
+            ).order_by(TestCaseItem.seq_no)
         )
         tc_items = tc_result.scalars().all()
         if not tc_items:
@@ -945,7 +991,10 @@ README:
         report_path = f"/workspace/repo/test-reports/{report_filename}"
 
         tc_result2 = await db.execute(
-            sa_select(TestCaseItem).where(TestCaseItem.task_id == task_id).order_by(TestCaseItem.seq_no)
+            sa_select(TestCaseItem).where(
+                TestCaseItem.task_id == task_id,
+                TestCaseItem.test_type == test_type,
+            ).order_by(TestCaseItem.seq_no)
         )
         tc_items2 = tc_result2.scalars().all()
         report_rows = ["| TC-ID | テスト項目 | 期待出力 | 実際の出力 | 判定 | 実行日時 |",

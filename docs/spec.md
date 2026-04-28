@@ -1,6 +1,6 @@
 # Xolvien — 現行仕様
 
-**最終更新**: 2026-04-27
+**最終更新**: 2026-04-28
 
 本書は現時点で実装済みの仕様を記録する。未実装の将来機能は `roadmap.md` に記載する。
 
@@ -84,12 +84,13 @@ PENDING → INITIALIZING → IDLE → RUNNING → TESTING → COMPLETED
 |---|---|---|
 | id | INTEGER PK | |
 | task_id | INTEGER FK | |
-| seq_no | INTEGER | タスク内連番（TC-001の元） |
+| test_type | ENUM | UNIT / INTEGRATION / E2E（デフォルト: UNIT） |
+| seq_no | INTEGER | テスト種別内の連番（UNIT: TC-001、INTEGRATION: ITC-001） |
 | target_screen | VARCHAR | 対象画面 |
 | test_item | VARCHAR | テスト項目 |
 | operation | TEXT | 操作方法（具体的入力値を含む） |
 | expected_output | TEXT | 期待される具体的出力値 |
-| function_name | VARCHAR | テスト関数名（例: test_tc001_login_empty_password） |
+| function_name | VARCHAR | テスト関数名（例: test_tc001_login / test_itc001_api_login） |
 
 **test_case_results**（実行ごとの記録）
 
@@ -190,15 +191,17 @@ WS  /api/v1/ws/tasks/{id}/status  ← WebSocket
 2.  要件確認（Claude ↔ ユーザー）← スキップ可
 3.  プロンプト確認 → ユーザーが承認
 4.  Claude が実装を実行（コミットまで自動）
-5.  Claude がテストケース一覧を自動生成（Markdown 形式）
-6.  ユーザーがテストケースを確認・編集 → 承認
-7.  Claude がテストコードを生成 → 単体テスト実行
+5.  Claude が単体テストケース一覧（TC-001 形式）を自動生成
+6.  ユーザーが単体テストケースを確認 → 承認
+7.  Claude が単体テストコードを生成 → テスト実行
 8.  失敗した場合は自動修正ループ（最大3回）
-9.  単体テスト合格 → 結合テストへ自動移行
-10. Claude が結合テストコードを生成 → サーバー＋DB を起動してテスト実行
-11. 失敗した場合は自動修正ループ（最大3回）
-12. ユーザーが実装を確認 → 承認 / 差し戻し
-13. Git Push
+9.  単体テスト合格 → 結合テストステップへ自動移行
+10. Claude が結合テストケース一覧（ITC-001 形式）を生成（単体TCとは別）
+11. ユーザーが結合テストケースを確認 → 承認
+12. Claude が結合テストコードを生成 → サーバー＋DB を起動してテスト実行
+13. 失敗した場合は自動修正ループ（最大3回）
+14. ユーザーが実装を確認 → 承認 / 差し戻し
+15. Git Push
 ```
 
 ### 4.2 ユーザー確認ポイント
@@ -206,9 +209,9 @@ WS  /api/v1/ws/tasks/{id}/status  ← WebSocket
 | タイミング | 確認内容 | 承認後の動作 | 差し戻し時の動作 |
 |---|---|---|---|
 | ステップ3 | プロンプトが意図通りか | 実装開始 | 指示を修正して再生成 |
-| ステップ6 | テストケースが網羅的か | テストコード生成・実行 | テストケースを修正して再承認 |
-| ステップ9（結合テスト画面） | 結合テストを実行するか | 結合テストコード生成・実行 | — |
-| ステップ12 | 実装が意図通りか | コミット確定 → 次フェーズ or Push | 指示入力に戻る（前回指示を復元） |
+| ステップ6 | 単体テストケースが網羅的か | 単体テストコード生成・実行 | テストケースを修正して再承認 |
+| ステップ11 | 結合テストケースが網羅的か | 結合テストコード生成・実行 | テストケースを修正して再承認 |
+| ステップ14 | 実装が意図通りか | コミット確定 → 次フェーズ or Push | 指示入力に戻る（前回指示を復元） |
 
 ### 4.3 セッション再開
 
@@ -258,7 +261,7 @@ ChatEntry =
 | implement（または未選択） | 有効（指示入力） | 要件を確認する / スキップしてプロンプトを生成 |
 | implement（未確定プロンプトあり） | 有効（フィードバック入力） | 確定して実行 / 再生成 |
 | unit_test | disabled | テストケースを生成 / 承認してテスト実行 / 修正を依頼 / テストを再実行 / テストケースを再生成 |
-| integration_test | disabled | 結合テストを実行 |
+| integration_test | disabled | 結合テストケースを生成 / 承認して結合テスト実行 / 修正を依頼 / 結合テストを再実行 |
 | review | disabled | 承認 / 差し戻し |
 
 ### 5.3 ステップバー
@@ -317,7 +320,7 @@ backend/app/
 | `execute_instruction()` | 任意の指示を Claude Agent で実行。AsyncGenerator でログを yield |
 | `clarify_requirements()` | 要件確認 Q&A。不明点を質問、十分な情報が揃ったら終了 |
 | `generate_prompt()` | 簡潔な指示を最適化されたプロンプトに変換 |
-| `generate_test_cases()` | 実装プロンプトからテストケース一覧（Markdown）を生成。エージェントモードでリポジトリの関連ファイルを読んで生成 |
+| `generate_test_cases()` | `test_type` 引数により単体（`TC-NNN` / `test_tc001_`）または結合（`ITC-NNN` / `test_itc001_`）のテストケースを生成。既存の同 `test_type` の TC のみ削除して保存（他種別は保持） |
 | `run_unit_tests()` | `_run_tests()` に `TestType.UNIT` を渡すラッパー |
 | `run_integration_tests()` | `_run_tests()` に `TestType.INTEGRATION` を渡すラッパー |
 | `_run_tests()` | テストコード生成 → 実行 → 自動修正ループ（最大3回）の共通実装。`TestType` により単体・結合を切り替え。EACCES 等のインフラエラーは即中断 |
@@ -347,9 +350,11 @@ backend/app/
 **結合テスト固有の動作**
 
 - `TestType.INTEGRATION` では `[ITEST]` タグでログを出力
-- テストプロンプトにサーバー起動手順（supertest / pytest + httpx）と HTTP リクエスト経由のテストパターンを追加指示
-- 単体テストと同じ `test_case_items` を再利用して結合テストコードを生成
+- テストケース生成プロンプトは結合テスト専用（APIエンドポイント・DB操作・コンポーネント間連携を検証。`ITC-NNN` / `test_itc001_` 形式）
+- テストコード生成プロンプトにサーバー起動手順（supertest / pytest + httpx）と HTTP リクエスト経由のテストパターンを追加指示
+- 単体テストとは独立した結合テスト専用の `test_case_items`（`test_type=INTEGRATION`）を使用
 - テスト結果は同じ `test_case_results` テーブルに `test_run_id` で紐付けて保存
+- `GET /test-cases?test_type=unit|integration` でフィルタリング可能
 
 ### 6.5 設計上の決定事項
 

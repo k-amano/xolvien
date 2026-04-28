@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, runUnitTestsStream, runIntegrationTestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, generateIntegrationTestCasesStream, runUnitTestsStream, runIntegrationTestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
 import type { TestCaseItem } from '../types'
 
 type ChatEntry =
@@ -15,6 +15,8 @@ type ChatEntry =
   | { type: 'implementation_done' }
   | { type: 'test_cases_generating' }
   | { type: 'test_cases_ready'; items: TestCaseItem[]; approved: boolean }
+  | { type: 'integration_test_cases_generating' }
+  | { type: 'integration_test_cases_ready'; items: TestCaseItem[]; approved: boolean }
   | { type: 'test_running'; label: string }
   | { type: 'test_done'; summary: string; passed: boolean; items: TestCaseItem[] }
   | { type: 'review'; prompt: string; items: TestCaseItem[]; resolved: boolean }
@@ -136,6 +138,7 @@ export default function TaskDetail() {
   const setTestResultSummary = (_v: string | null) => { /* stored in chatEntries */ }
   const setTestPassed = (_v: boolean | null) => { /* stored in chatEntries */ }
   const [, setTestCaseItems] = useState<TestCaseItem[]>([])
+  const [, setIntegrationTestCaseItems] = useState<TestCaseItem[]>([])
   const [showRevisionInput, setShowRevisionInput] = useState(false)
   const [revisionText, setRevisionText] = useState('')
   const [confirmedPrompt, setConfirmedPrompt] = useState('')
@@ -200,10 +203,11 @@ export default function TaskDetail() {
 
     async function checkResume() {
       try {
-        const [runs, lastInstruction, items] = await Promise.all([
+        const [runs, lastInstruction, unitItems, integrationItems] = await Promise.all([
           getTestRuns(taskId),
           getLastCompletedInstruction(taskId),
-          getTestCaseItems(taskId),
+          getTestCaseItems(taskId, 'unit'),
+          getTestCaseItems(taskId, 'integration'),
         ])
 
         const hasImpl = !!lastInstruction
@@ -222,10 +226,10 @@ export default function TaskDetail() {
           initialEntries.push({ type: 'implementation_done' })
         }
 
-        if (items.length > 0) {
-          setTestCaseItems(items)
+        if (unitItems.length > 0) {
+          setTestCaseItems(unitItems)
           const testCasesApproved = lastUnit != null
-          initialEntries.push({ type: 'test_cases_ready', items, approved: testCasesApproved })
+          initialEntries.push({ type: 'test_cases_ready', items: unitItems, approved: testCasesApproved })
         } else if (hasImpl) {
           initialEntries.push({ type: 'test_cases_ready', items: [], approved: false })
         }
@@ -237,22 +241,29 @@ export default function TaskDetail() {
             type: 'test_done',
             summary: lastUnit.summary ?? '',
             passed: lastUnit.passed,
-            items: items,
+            items: unitItems,
           })
           if (lastUnit.passed) {
+            if (integrationItems.length > 0) {
+              setIntegrationTestCaseItems(integrationItems)
+              const integrationTCApproved = lastIntegration != null
+              initialEntries.push({ type: 'integration_test_cases_ready', items: integrationItems, approved: integrationTCApproved })
+            } else {
+              initialEntries.push({ type: 'integration_test_cases_ready', items: [], approved: false })
+            }
             if (lastIntegration) {
               initialEntries.push({
                 type: 'test_done',
                 summary: lastIntegration.summary ?? '',
                 passed: lastIntegration.passed,
-                items: items,
+                items: integrationItems,
               })
               if (lastIntegration.passed) {
-                initialEntries.push({ type: 'review', prompt, items, resolved: false })
+                initialEntries.push({ type: 'review', prompt, items: unitItems, resolved: false })
               }
             }
           } else {
-            initialEntries.push({ type: 'test_cases_ready', items, approved: false })
+            initialEntries.push({ type: 'test_cases_ready', items: unitItems, approved: false })
           }
         }
 
@@ -689,7 +700,7 @@ export default function TaskDetail() {
           async () => {
             setGeneratingTestCases(false)
             try {
-              const items = await getTestCaseItems(taskId)
+              const items = await getTestCaseItems(taskId, 'unit')
               setTestCaseItems(items)
               setChatEntries(prev => prev.map((e, i) =>
                 i === streamingEntryIndexRef.current
@@ -798,7 +809,7 @@ export default function TaskDetail() {
         setRunningTestType(null)
         setTestPhaseLabel(null)
         try {
-          const [runs, freshItems] = await Promise.all([getTestRuns(taskId), getTestCaseItems(taskId)])
+          const [runs, freshItems] = await Promise.all([getTestRuns(taskId), getTestCaseItems(taskId, 'unit')])
           setTestCaseItems(freshItems)
           const lastUnit = runs.find(r => r.test_type === 'unit' && r.completed_at)
           if (lastUnit) {
@@ -838,7 +849,7 @@ export default function TaskDetail() {
     testCountRef.current = { passed: 0, failed: 0 }
 
     setChatEntries(prev => prev.map(e =>
-      e.type === 'test_cases_ready' && !e.approved ? { ...e, approved: true } : e
+      e.type === 'integration_test_cases_ready' && !e.approved ? { ...e, approved: true } : e
     ))
 
     setChatEntries(prev => {
@@ -897,8 +908,8 @@ export default function TaskDetail() {
         setRunningTestType(null)
         setTestPhaseLabel(null)
         try {
-          const [runs, freshItems] = await Promise.all([getTestRuns(taskId), getTestCaseItems(taskId)])
-          setTestCaseItems(freshItems)
+          const [runs, freshItems] = await Promise.all([getTestRuns(taskId), getTestCaseItems(taskId, 'integration')])
+          setIntegrationTestCaseItems(freshItems)
           const lastIntegration = runs.find(r => r.test_type === 'integration' && r.completed_at)
           if (lastIntegration) {
             setTestResultSummary(lastIntegration.summary ?? null)
@@ -958,7 +969,7 @@ export default function TaskDetail() {
       async () => {
         setGeneratingTestCases(false)
         try {
-          const items = await getTestCaseItems(taskId)
+          const items = await getTestCaseItems(taskId, 'unit')
           setTestCaseItems(items)
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current
@@ -978,6 +989,55 @@ export default function TaskDetail() {
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
             ? { type: 'error', message: `テストケース生成エラー: ${err}` }
+            : e
+        ))
+      }
+    )
+  }
+
+  async function handleGenerateIntegrationTestCasesManual() {
+    if (!confirmedPrompt || task?.status !== 'idle') return
+    setGeneratingTestCases(true)
+    setChatEntries(prev => {
+      streamingEntryIndexRef.current = prev.length
+      return [...prev, { type: 'integration_test_cases_generating' }]
+    })
+    streamKeyRef.current += 1
+    const tcStreamKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
+    await generateIntegrationTestCasesStream(
+      taskId,
+      confirmedPrompt,
+      (chunk) => {
+        setLogEntries(prev => prev.map(entry =>
+          entry.kind === 'stream' && entry.key === tcStreamKey
+            ? { ...entry, text: entry.text + chunk }
+            : entry
+        ))
+      },
+      async () => {
+        setGeneratingTestCases(false)
+        try {
+          const items = await getTestCaseItems(taskId, 'integration')
+          setIntegrationTestCaseItems(items)
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'integration_test_cases_ready', items, approved: false }
+              : e
+          ))
+        } catch {
+          setChatEntries(prev => prev.map((e, i) =>
+            i === streamingEntryIndexRef.current
+              ? { type: 'error', message: '結合テストケース取得エラー' }
+              : e
+          ))
+        }
+      },
+      (err) => {
+        setGeneratingTestCases(false)
+        setChatEntries(prev => prev.map((e, i) =>
+          i === streamingEntryIndexRef.current
+            ? { type: 'error', message: `結合テストケース生成エラー: ${err}` }
             : e
         ))
       }
@@ -1029,7 +1089,7 @@ export default function TaskDetail() {
       async () => {
         setGeneratingTestCases(false)
         try {
-          const items = await getTestCaseItems(taskId)
+          const items = await getTestCaseItems(taskId, 'unit')
           setTestCaseItems(items)
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current
@@ -1259,6 +1319,64 @@ export default function TaskDetail() {
                       <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600, whiteSpace: 'nowrap' }}>対象画面</th>
                       <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>テスト項目</th>
                       <th style={{ padding: '4px 6px', textAlign: 'left', color: '#6366f1', fontWeight: 600 }}>期待出力</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {entry.items.map((tc) => (
+                      <tr key={tc.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                        <td style={{ padding: '3px 6px', color: '#94a3b8', fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{tc.tc_id}</td>
+                        <td style={{ padding: '3px 6px', color: '#94a3b8', whiteSpace: 'nowrap' }}>{tc.target_screen ?? '—'}</td>
+                        <td style={{ padding: '3px 6px', color: '#cbd5e1' }}>{tc.test_item}</td>
+                        <td style={{ padding: '3px 6px', color: '#94a3b8', fontSize: '0.72rem' }}>{tc.expected_output ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )
+
+      case 'integration_test_cases_generating':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a', border: '1px solid #334155', borderRadius: '6px',
+            padding: '10px 12px', fontSize: '0.82rem', color: '#94a3b8',
+            display: 'flex', alignItems: 'center', gap: '8px',
+          }}>
+            <span className="spinner" style={{ width: '12px', height: '12px', marginRight: 0 }} />
+            結合テストケースを生成しています...
+          </div>
+        )
+
+      case 'integration_test_cases_ready':
+        return (
+          <div key={idx} style={{
+            background: '#0f172a',
+            border: `1px solid ${entry.approved ? '#334155' : '#a855f7'}`,
+            borderRadius: '6px', padding: '12px', fontSize: '0.82rem',
+          }}>
+            <div style={{ color: '#a855f7', fontSize: '0.72rem', marginBottom: '8px', fontWeight: 600 }}>
+              結合テストケース {entry.approved ? '(承認済み)' : `— ${entry.items.length} 件${entry.items.length > 0 ? '　下のボタンで承認' : ''}`}
+            </div>
+            {entry.items.length === 0 ? (
+              <div style={{ color: '#475569', fontSize: '0.82rem' }}>
+                結合テストケースがまだ生成されていません
+                {confirmedPrompt && task?.status !== 'idle' && (
+                  <span style={{ display: 'block', fontSize: '0.78rem', color: '#ef4444', marginTop: '4px' }}>
+                    タスクのコンテナが起動していません（ステータス: {task?.status}）
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto', maxHeight: '200px', overflowY: 'auto' }}>
+                <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#a855f7', fontWeight: 600, whiteSpace: 'nowrap' }}>ID</th>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#a855f7', fontWeight: 600, whiteSpace: 'nowrap' }}>対象</th>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#a855f7', fontWeight: 600 }}>テスト項目</th>
+                      <th style={{ padding: '4px 6px', textAlign: 'left', color: '#a855f7', fontWeight: 600 }}>期待出力</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1515,23 +1633,76 @@ export default function TaskDetail() {
 
     // --- integration_test step selected ---
     if (effectiveStep === 'integration_test') {
-      // Reuse the same test cases approved for unit test
-      const latestTestCases = chatEntries.reduce<(ChatEntry & { type: 'test_cases_ready' }) | null>(
-        (last, e) => e.type === 'test_cases_ready' ? e as ChatEntry & { type: 'test_cases_ready' } : last, null)
-      if (latestTestCases && latestTestCases.items.length > 0) {
+      const lastUnapprovedIntegrationTC = chatEntries.reduce<(ChatEntry & { type: 'integration_test_cases_ready' }) | null>(
+        (last, e) => e.type === 'integration_test_cases_ready' && !e.approved
+          ? e as ChatEntry & { type: 'integration_test_cases_ready' }
+          : last,
+        null
+      )
+
+      if (lastUnapprovedIntegrationTC) {
+        const itcItems = lastUnapprovedIntegrationTC.items
+        if (itcItems.length === 0) {
+          return (
+            <div className="instruction-footer" style={{ margin: 0 }}>
+              {confirmedPrompt && task?.status === 'idle' ? (
+                <button className="btn-primary" onClick={handleGenerateIntegrationTestCasesManual} disabled={isBusy}>
+                  {generatingTestCases ? '結合テストケース生成中...' : '結合テストケースを生成'}
+                </button>
+              ) : (
+                <span style={{ fontSize: '0.82rem', color: '#475569' }}>
+                  {task?.status !== 'idle' ? `コンテナが起動していません（${task?.status}）` : '結合テストケースを生成できません'}
+                </span>
+              )}
+            </div>
+          )
+        }
         return (
           <div className="instruction-footer" style={{ margin: 0 }}>
-            <button className="btn-primary" onClick={() => handleApproveIntegrationTestCases(latestTestCases.items)} disabled={isBusy}>
-              {runningTests ? '結合テスト実行中...' : '結合テストを実行'}
+            <button className="btn-primary" onClick={() => handleApproveIntegrationTestCases(itcItems)} disabled={isBusy}>
+              {runningTests ? '結合テスト実行中...' : '承認して結合テスト実行'}
+            </button>
+            <button className="btn-secondary" onClick={handleGenerateIntegrationTestCasesManual} disabled={isBusy}>
+              修正を依頼
             </button>
           </div>
         )
       }
+
+      // All approved or initial load
+      const latestIntegrationTC = chatEntries.reduce<(ChatEntry & { type: 'integration_test_cases_ready' }) | null>(
+        (last, e) => e.type === 'integration_test_cases_ready'
+          ? e as ChatEntry & { type: 'integration_test_cases_ready' }
+          : last,
+        null
+      )
+      if (latestIntegrationTC && latestIntegrationTC.items.length > 0) {
+        return (
+          <div className="instruction-footer" style={{ margin: 0 }}>
+            <button className="btn-primary" onClick={() => handleApproveIntegrationTestCases(latestIntegrationTC.items)} disabled={isBusy}>
+              {runningTests ? '結合テスト実行中...' : '結合テストを再実行'}
+            </button>
+            {confirmedPrompt && task?.status === 'idle' && (
+              <button className="btn-secondary" onClick={handleGenerateIntegrationTestCasesManual} disabled={isBusy}>
+                {generatingTestCases ? '結合テストケース生成中...' : '結合テストケースを再生成'}
+              </button>
+            )}
+          </div>
+        )
+      }
+
+      // No integration test cases yet
       return (
         <div className="instruction-footer" style={{ margin: 0 }}>
-          <span style={{ fontSize: '0.82rem', color: '#475569' }}>
-            先に単体テストを完了してください
-          </span>
+          {confirmedPrompt && task?.status === 'idle' ? (
+            <button className="btn-primary" onClick={handleGenerateIntegrationTestCasesManual} disabled={isBusy}>
+              {generatingTestCases ? '結合テストケース生成中...' : '結合テストケースを生成'}
+            </button>
+          ) : (
+            <span style={{ fontSize: '0.82rem', color: '#475569' }}>
+              {task?.status !== 'idle' ? `コンテナが起動していません（${task?.status}）` : '先に単体テストを完了してください'}
+            </span>
+          )}
         </div>
       )
     }

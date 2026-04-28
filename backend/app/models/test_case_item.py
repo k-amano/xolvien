@@ -1,8 +1,9 @@
 """Test case item model — one row per approved test case (specification level)."""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum
 from sqlalchemy.orm import relationship
 from app.database import Base
+from app.models.test_run import TestType
 
 
 class TestCaseItem(Base):
@@ -11,6 +12,9 @@ class TestCaseItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
     seq_no = Column(Integer, nullable=False)          # 1-based within the task → TC-001
+
+    # Test type: UNIT / INTEGRATION / E2E
+    test_type = Column(Enum(TestType), default=TestType.UNIT, nullable=False)
 
     # Specification fields
     target_screen = Column(String(256), nullable=True)   # 対象画面
@@ -29,4 +33,5 @@ class TestCaseItem(Base):
 
     @property
     def tc_id(self) -> str:
-        return f"TC-{self.seq_no:03d}"
+        prefix = "ITC" if self.test_type == TestType.INTEGRATION else "TC"
+        return f"{prefix}-{self.seq_no:03d}"

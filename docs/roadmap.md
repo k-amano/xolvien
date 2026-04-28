@@ -1,6 +1,6 @@
 # 改修計画
 
-**最終更新**: 2026-04-27
+**最終更新**: 2026-04-28
 
 現在実装済みの機能は `spec.md` を参照。
 
@@ -126,17 +126,25 @@
 
 ---
 
-## ~~フェーズ2: 結合テスト~~ ✅ 対応済み（2026-04-27）
+## ~~フェーズ2: 結合テスト~~ ✅ 対応済み（2026-04-28）
 
+**2026-04-27 初回実装:**
 - `claude_service.py` に `run_integration_tests()` を追加（`_run_tests()` 共通ヘルパーに `TestType.INTEGRATION` を渡す）
 - `_run_tests()` に結合テスト固有プロンプト（サーバー起動・HTTP リクエストテスト）を追加
 - `instructions.py` に `POST /run-integration-tests` エンドポイントを追加
-- `frontend/src/services/api.ts` に `runIntegrationTestsStream()` を追加
 - ステップバーの「結合テスト」ステップをアクティブ化（`future: true` を削除）
-- 単体テスト合格後に自動的に「結合テスト」ステップへ遷移
-- `handleApproveIntegrationTestCases()` ハンドラを追加（`[ITEST]` タグでバナー進捗を追跡）
-- 結合テスト合格後に「実装確認」ステップへ遷移
-- セッション再開時に結合テスト `TestRun` 履歴を DB から復元
+- 単体テスト合格後に「結合テスト」ステップへ自動遷移し、合格後に「実装確認」へ遷移
+
+**2026-04-28 テストケース分離（案A）:**
+- **問題**: 単体テストと結合テストでテストケースが共通だった（対象が違うのに同じケース）
+- `test_case_items` テーブルに `test_type` カラム追加（UNIT / INTEGRATION）
+- DBマイグレーション追加（`a1b2c3d4e5f6`）
+- 単体テストケース: `TC-NNN` / `test_tc001_` 形式。結合テストケース: `ITC-NNN` / `test_itc001_` 形式
+- `generate_test_cases()` を `test_type` 引数対応に変更（結合用は API 連携・DB 操作を検証するプロンプト）
+- `POST /generate-integration-test-cases` エンドポイント追加
+- `GET /test-cases?test_type=unit|integration` でフィルタリング対応
+- フロントエンドに結合テストケースの生成→確認→承認→実行の独立フローを追加
+- セッション再開時に単体・結合テストケースをそれぞれ別途 DB から復元
 
 ---
 

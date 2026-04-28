@@ -8,6 +8,7 @@ from typing import List
 from app.database import get_db
 from app.models.task import Task
 from app.models.instruction import Instruction, InstructionStatus
+from app.models.test_run import TestType
 from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest, RunIntegrationTestsRequest
 from app.api.auth import verify_token
 from app.services.claude_service import get_claude_service
@@ -187,6 +188,39 @@ async def generate_test_cases_stream(
         try:
             async for chunk in claude_service.generate_test_cases(
                 db, task_id, data.implementation_prompt
+            ):
+                yield chunk
+        except ValueError as e:
+            yield f"[ERROR] {str(e)}\n"
+        except Exception as e:
+            yield f"[ERROR] Unexpected error: {str(e)}\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.post("/generate-integration-test-cases")
+async def generate_integration_test_cases_stream(
+    task_id: int,
+    data: GenerateTestCasesRequest,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """Generate integration test cases. Returns streaming response."""
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    claude_service = get_claude_service()
+
+    async def generate():
+        try:
+            async for chunk in claude_service.generate_test_cases(
+                db, task_id, data.implementation_prompt, TestType.INTEGRATION
             ):
                 yield chunk
         except ValueError as e:

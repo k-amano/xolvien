@@ -1,14 +1,15 @@
 """Test case items and results API endpoints."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+from typing import List, Optional
 
 from app.database import get_db
 from app.api.auth import verify_token
 from app.models.task import Task
 from app.models.test_case_item import TestCaseItem
 from app.models.test_case_result import TestCaseResult
+from app.models.test_run import TestType
 from app.schemas.test_case import TestCaseItemWithLatestResult, TestCaseResultResponse
 
 router = APIRouter(prefix="/api/v1/tasks/{task_id}/test-cases", tags=["test-cases"])
@@ -17,17 +18,28 @@ router = APIRouter(prefix="/api/v1/tasks/{task_id}/test-cases", tags=["test-case
 @router.get("", response_model=List[TestCaseItemWithLatestResult])
 async def get_test_case_items(
     task_id: int,
+    test_type: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     _token: str = Depends(verify_token),
 ):
-    """Get all test case items for a task, with their latest result attached."""
+    """Get all test case items for a task, with their latest result attached.
+
+    Optionally filter by test_type (unit, integration, e2e).
+    """
     result = await db.execute(select(Task).where(Task.id == task_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Task not found")
 
-    tc_result = await db.execute(
-        select(TestCaseItem).where(TestCaseItem.task_id == task_id).order_by(TestCaseItem.seq_no)
-    )
+    query = select(TestCaseItem).where(TestCaseItem.task_id == task_id)
+    if test_type is not None:
+        try:
+            tt = TestType(test_type)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid test_type: {test_type}")
+        query = query.where(TestCaseItem.test_type == tt)
+    query = query.order_by(TestCaseItem.seq_no)
+
+    tc_result = await db.execute(query)
     items = tc_result.scalars().all()
 
     out = []
@@ -45,6 +57,7 @@ async def get_test_case_items(
             task_id=item.task_id,
             seq_no=item.seq_no,
             tc_id=item.tc_id,
+            test_type=item.test_type,
             target_screen=item.target_screen,
             test_item=item.test_item,
             operation=item.operation,
