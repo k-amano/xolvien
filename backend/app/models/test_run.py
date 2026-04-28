@@ -1,7 +1,8 @@
 """Test run model."""
 import enum
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean, Enum
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy.dialects.postgresql import ENUM
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -10,6 +11,10 @@ class TestType(str, enum.Enum):
     UNIT = "unit"
     INTEGRATION = "integration"
     E2E = "e2e"
+
+
+# Reuse existing 'testtype' PG enum (values: unit, integration, e2e)
+_testtype_pg = ENUM('unit', 'integration', 'e2e', name='testtype', create_type=False)
 
 
 class TestRun(Base):
@@ -21,7 +26,7 @@ class TestRun(Base):
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
 
     # Test execution info
-    test_type = Column(Enum(TestType), default=TestType.UNIT, nullable=False)
+    test_type = Column(_testtype_pg, default=TestType.UNIT, nullable=False)
     test_command = Column(String(512), nullable=True)
     test_cases = Column(Text, nullable=True)  # テストケース一覧（Markdown形式）
     exit_code = Column(Integer, nullable=True)
