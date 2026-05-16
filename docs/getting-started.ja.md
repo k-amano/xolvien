@@ -124,34 +124,25 @@ cd xolvien
 cp .env.example backend/.env
 ```
 
-何も表示されなければ成功です。設定はデフォルトのままで動作します。確認したい場合：
+何も表示されなければ成功です。
 
-```bash
-cat backend/.env
-```
-
-以下のような内容が表示されます。
+次に、テキストエディタで `backend/.env` を開き、GitHub Personal Access Token を設定します。
 
 ```
-DATABASE_URL=postgresql+asyncpg://xolvien:xolvien@localhost:5433/xolvien
-API_HOST=0.0.0.0
-API_PORT=8000
-FRONTEND_URL=http://localhost:5173
-DEV_AUTH_TOKEN=dev-token-12345
-DOCKER_SOCKET=/var/run/docker.sock
-WORKSPACE_IMAGE=xolvien-workspace:latest
-TASK_DATA_PATH=/tmp/xolvien/tasks
-ANTHROPIC_API_KEY=
-ENVIRONMENT=development
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
+
+**トークンの取得方法：**
+
+1. GitHub → **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)** を開く
+2. **Generate new token (classic)** をクリック
+3. 名前（例：`xolvien`）と有効期限を設定し、**`repo`** スコープにチェックを入れる
+4. **Generate token** をクリックしてトークンをコピーする
+5. `backend/.env` の `GITHUB_TOKEN=` の後にペーストして保存する
+
+このトークンはタスク作成画面の「GitHubで作成」タブで使用し、GitHub リポジトリを自動作成します。設定しない場合、リポジトリは GitHub で手動作成してから Xolvien に登録する必要があります。
 
 > `ANTHROPIC_API_KEY` は空のままで構いません。Claude Code CLI が Claude Max Plan のサブスクリプションを使用するため、APIキーは不要です。
-
-> **`GITHUB_TOKEN`（任意）：** タスク作成画面から GitHub リポジトリを直接作成したい場合は、GitHub Personal Access Token をここに設定します。GitHub → Settings → Developer settings → Personal access tokens → Generate new token で **`repo`** スコープを付与して発行してください。手動で GitHub にリポジトリを作成する場合は空のままで構いません。
->
-> ```
-> GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-> ```
 
 ---
 

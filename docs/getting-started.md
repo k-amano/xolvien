@@ -124,34 +124,25 @@ Run the following:
 cp .env.example backend/.env
 ```
 
-No output means success. To verify:
+No output means success.
+
+Next, open `backend/.env` in a text editor and set your GitHub Personal Access Token:
 
 ```bash
-cat backend/.env
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-You should see something like:
+**How to get a token:**
 
-```
-DATABASE_URL=postgresql+asyncpg://xolvien:xolvien@localhost:5433/xolvien
-API_HOST=0.0.0.0
-API_PORT=8000
-FRONTEND_URL=http://localhost:5173
-DEV_AUTH_TOKEN=dev-token-12345
-DOCKER_SOCKET=/var/run/docker.sock
-WORKSPACE_IMAGE=xolvien-workspace:latest
-TASK_DATA_PATH=/tmp/xolvien/tasks
-ANTHROPIC_API_KEY=
-ENVIRONMENT=development
-```
+1. Go to GitHub → **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**
+2. Click **Generate new token (classic)**
+3. Set a name (e.g. `xolvien`), set an expiration, and check the **`repo`** scope
+4. Click **Generate token** and copy the token
+5. Paste it after `GITHUB_TOKEN=` in `backend/.env`
+
+This token is used by the "Create on GitHub" tab on the task creation screen to create GitHub repositories automatically. Without it, you will need to create repositories on GitHub manually before registering them in Xolvien.
 
 > Leave `ANTHROPIC_API_KEY` empty. Claude Code CLI uses your Max Plan subscription, so no API key is needed.
-
-> **`GITHUB_TOKEN` (optional):** If you want to create GitHub repositories directly from the Xolvien task creation screen, set a GitHub Personal Access Token here. Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token, and grant the **`repo`** scope. Leave it empty if you prefer to create repositories on GitHub manually.
->
-> ```
-> GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-> ```
 
 ---
 
