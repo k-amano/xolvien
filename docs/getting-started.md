@@ -147,6 +147,12 @@ ENVIRONMENT=development
 
 > Leave `ANTHROPIC_API_KEY` empty. Claude Code CLI uses your Max Plan subscription, so no API key is needed.
 
+> **`GITHUB_TOKEN` (optional):** If you want to create GitHub repositories directly from the Xolvien task creation screen, set a GitHub Personal Access Token here. Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token, and grant the **`repo`** scope. Leave it empty if you prefer to create repositories on GitHub manually.
+>
+> ```
+> GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+> ```
+
 ---
 
 ## Step 4 — Start the database
@@ -515,7 +521,22 @@ Each task runs on its own independent branch, so **work from one task never leak
 
 > Example: "I want to build a translation app from scratch."
 
-**Create a repository on GitHub first**, then register it in Xolvien and create a task.
+You have two options:
+
+**Option A — Create the GitHub repository from Xolvien (recommended if `GITHUB_TOKEN` is set):**
+
+```
+Flow:
+1. Xolvien → "New task"
+2. "Create on GitHub" tab → enter name and description → Xolvien creates the repo on GitHub automatically
+3. Enter task title (e.g. "Build translation app")
+4. "Create task"
+   ↓
+   xolvien/1-create-translation-app is automatically created from main
+   Work starts against the empty repository
+```
+
+**Option B — Create the repository on GitHub first, then register it:**
 
 ```
 Flow:
@@ -524,14 +545,12 @@ Flow:
 3. "Add new repository" tab → enter SSH URL and register
 4. Enter task title (e.g. "Build translation app")
 5. "Create task"
-   ↓
-   xolvien/1-create-translation-app is automatically created from main
-   Work starts against the empty repository
 ```
 
 **Key points:**
 - The repository can be **completely empty** (even without a README).
 - Xolvien creates the branch and generates all code from scratch.
+- "Create on GitHub" requires `GITHUB_TOKEN` in `backend/.env`.
 
 ---
 
@@ -591,7 +610,13 @@ Flow:
 A different program goes in a **different repository**. Putting a calculator app inside the translation app's repository is not recommended.
 
 ```
-Flow:
+Flow (with GITHUB_TOKEN set):
+1. Xolvien → "New task"
+2. "Create on GitHub" tab → enter the new repository name → created automatically
+3. Enter task title (e.g. "Build calculator app")
+4. "Create task"
+
+Flow (without GITHUB_TOKEN):
 1. Create a new repository for the calculator app on GitHub
 2. Xolvien → "New task"
 3. "Add new repository" tab → enter the new repository's SSH URL and register
@@ -611,10 +636,15 @@ When the "select repository" screen appears during task creation:
 
 | Situation | Tab to select |
 |---|---|
-| Registering this repository in Xolvien for the first time | **Add new repository** |
 | This repository was used in Xolvien before | **Select existing repository** |
+| Repository already exists on GitHub, first time registering | **Add new repository** |
+| Want to create a new GitHub repository and register it in one step | **Create on GitHub** |
 
-If the repository name appears in the "Select existing repository" list, choose "existing." If the list is empty or the name is missing, choose "Add new repository."
+If the repository name appears in the "Select existing repository" list, choose "existing."
+If the repository already exists on GitHub but isn't registered yet, choose "Add new repository."
+If you haven't created the repository on GitHub yet, use "Create on GitHub" to do both at once.
+
+> **"Create on GitHub" requires `GITHUB_TOKEN`** to be set in `backend/.env`. See Step 3.
 
 ---
 
@@ -634,12 +664,14 @@ A "Create new task" dialog opens.
 
 ### Step A — Select a repository
 
-The dialog has two tabs: **"Select existing repository"** and **"Add new repository"**.
+The dialog has three tabs: **"Select existing repository"**, **"Add new repository"**, and **"Create on GitHub"**.
 
 > For guidance on which to choose, see Part 3.
-> Since this is the first time using the translation app, select **"Add new repository"**.
+> Since this is the first time using the translation app, use **"Create on GitHub"** (if `GITHUB_TOKEN` is set) or **"Add new repository"** (if you already created the repository on GitHub).
 
-Click **"Add new repository"** and fill in:
+**If using "Create on GitHub"** — fill in the repository name and optional description, then proceed to Step B.
+
+**If using "Add new repository"** — fill in the fields below:
 
 > **Prerequisites:** The repository must already exist on GitHub. If not, create it on GitHub before continuing.
 
