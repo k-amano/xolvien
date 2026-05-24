@@ -36,7 +36,7 @@ def _keepalive():
     while proc.poll() is None:
         time.sleep(3)
         if proc.poll() is None:
-            sys.stdout.buffer.write(b'[Claude] ...\n')
+            sys.stdout.buffer.write(b'[Claude] ...\\n')
             sys.stdout.buffer.flush()
 threading.Thread(target=_keepalive, daemon=True).start()
 for chunk in iter(lambda: proc.stdout.read(512), b''):
@@ -101,7 +101,7 @@ def _keepalive():
     while proc.poll() is None:
         time.sleep(3)
         if proc.poll() is None:
-            sys.stdout.buffer.write(b'[Claude] ...\n')
+            sys.stdout.buffer.write(b'[Claude] ...\\n')
             sys.stdout.buffer.flush()
 t = threading.Thread(target=_keepalive, daemon=True)
 t.start()
