@@ -2,6 +2,40 @@
 
 ---
 
+## 2026-05-24
+
+### Bug Fixes: Stream Silence, Keepalive, Error Propagation
+
+**Problem**: During `execute_instruction()`, Claude Code CLI could be silent for more than 60 seconds (e.g. during file reads or writes), causing a `StreamTimeoutError`. Worse, when a timeout occurred the task continued to the next step (e.g. test generation) instead of being aborted.
+
+**Changes:**
+
+- Backend `claude_service.py`: Added a keepalive daemon thread to `_RUNNER_SCRIPT` and `_RUNNER_SCRIPT_AGENT`.
+  - Writes `[Claude] ...\n` to stdout every **3 seconds** while Claude is running.
+  - Uses `sys.stdout.buffer.write()` + `flush()` to avoid buffering.
+  - Thread is a daemon so it terminates automatically when Claude exits.
+  - 3-second interval was chosen because users cannot tolerate silence longer than that.
+
+- Backend `claude_service.py`: Fixed `SyntaxError` in generated runner script (`_RUNNER_SCRIPT` / `_RUNNER_SCRIPT_AGENT`).
+  - **Cause**: The keepalive write used `b'[Claude] ...\n'` inside a Python triple-quoted string. The `\n` was interpreted as a literal newline by the outer string, producing an unterminated string literal in the generated script and a `SyntaxError` on startup — making Claude completely silent from the start.
+  - **Fix**: Changed to `b'[Claude] ...\\n'` so the generated script contains the escape sequence `\n` rather than an actual newline.
+
+- Backend `claude_service.py`: Fixed "Not logged in" error in agent mode (`_RUNNER_SCRIPT_AGENT`).
+  - **Cause**: `_RUNNER_SCRIPT` set `HOME='/root'` at the top, but Claude credentials were copied to `/home/xolvien/.claude/`. Claude Code CLI looked in the wrong directory.
+  - **Fix**: `HOME` is now set via `pwd.getpwnam('xolvien').pw_dir` so it resolves to the actual xolvien user's home directory.
+
+- Backend `claude_service.py`: Increased `chunk_timeout` on long-running calls.
+  - `clarify_requirements()`, `generate_prompt()`, and `execute_instruction()` now pass `chunk_timeout=120.0` (was 60.0 s default). The keepalive thread emits every 3 s so this timeout is now a backstop for true hangs, not normal inter-tool pauses.
+
+- Backend `claude_service.py`: `execute_instruction()` now sets `task.status = FAILED` on error.
+  - Previously the status was left as `IDLE` after a stream timeout, allowing users to proceed to Git Push even after a failed implementation. Now status is `FAILED`, which disables the Git Push button until the issue is resolved.
+
+- Backend `docker_service.py`: Fixed `put_archive` 404 error when copying Claude credentials into a new container.
+  - **Cause**: `container.put_archive('/home/xolvien/.claude/', ...)` raised a 404 if the target directory did not exist yet.
+  - **Fix**: Added `container.exec_run(["bash", "-c", "mkdir -p /home/xolvien/.claude"])` before `put_archive`. Also changed the subsequent `chown` to `chown -R xolvien:xolvien /home/xolvien/.claude` (recursive).
+
+---
+
 ## 2026-05-09
 
 ### GitHub API: Automatic Repository Creation

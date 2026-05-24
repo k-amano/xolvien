@@ -1,6 +1,6 @@
 # Xolvien — Current Specification
 
-**Last updated**: 2026-05-05 (real-time test case generation progress)
+**Last updated**: 2026-05-24 (keepalive thread, FAILED status on error, credentials copy fix)
 
 This document records the specification as currently implemented. Unimplemented future features are described in `roadmap.md`.
 
@@ -357,7 +357,7 @@ backend/app/
 - Contents: Python 3.11-slim + Git + Node.js 20 + Claude Code CLI
 - Per-task volume: `xolvien-task-{task_id}-data` (mounted at `/workspace`)
 - SSH keys: host `~/.ssh/` mounted into the container (for GitHub auth)
-- Claude credentials: host `~/.claude/` mounted into the container
+- Claude credentials: only `~/.claude/.credentials.json` is copied into `/home/xolvien/.claude/` (not the full directory). The target directory is created with `mkdir -p` before copying via `put_archive`, and ownership is set to `xolvien:xolvien`.
 
 ### 6.4 Test Execution Details
 
@@ -394,6 +394,14 @@ backend/app/
 - Uses independent `test_case_items` with `test_type=E2E`.
 
 ### 6.5 Design Decisions
+
+**Keepalive thread prevents stream silence**
+
+`_RUNNER_SCRIPT` and `_RUNNER_SCRIPT_AGENT` both spawn a daemon thread that writes `[Claude] ...\n` to stdout every 3 seconds while Claude is running. This ensures the `execute_command_stream` chunk timeout (120 s) is never hit during normal inter-tool pauses. The 3-second interval is the maximum acceptable silence from a UX standpoint. The thread is a daemon so it terminates automatically when Claude exits.
+
+**Task status is set to FAILED on execution error**
+
+When `execute_instruction()` raises an error (e.g. stream timeout), the task status is set to `FAILED` rather than `IDLE`. This keeps the Git Push button disabled until the issue is resolved, preventing users from pushing incomplete or broken code.
 
 **Why prompt generation also runs in agent mode**
 
