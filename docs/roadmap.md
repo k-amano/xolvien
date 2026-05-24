@@ -1,12 +1,36 @@
 # Roadmap
 
-**Last updated**: 2026-05-03
+**Last updated**: 2026-05-24
 
 See `spec.md` for currently implemented features.
 
 ---
 
 ## Priority: High (critical quality issues)
+
+### Real-time Log Display (Claude Code style)
+
+Currently the left pane only shows output after Claude emits a chunk. Between tool calls (file reads, writes, bash) Claude can be silent, leaving the user with no feedback.
+
+**Requirements:**
+- Stream every line of Claude's output to the left pane in real time, the same way Claude Code CLI displays it in the terminal — tool calls, file operations, thinking steps, and final output all visible as they happen.
+- No silence longer than 3 seconds at any point during execution.
+
+**Note:** The current keepalive `[Claude] ...\n` workaround emits a dot every 3s but does not show what Claude is actually doing. The goal is to show real activity, not a heartbeat.
+
+---
+
+### Error Display
+
+When an error occurs (timeout, Claude failure, container error, etc.), it must be immediately visible to the user in an unmissable way.
+
+**Requirements:**
+- Display errors as a prominently styled banner (red background, large text) in the right pane, not buried in the log stream.
+- The banner must appear immediately when the error occurs — not after a delay.
+- The Git Push button and all other action buttons must be disabled until the error is resolved.
+- The current `[ERROR]` line in the log stream is insufficient — users miss it and proceed with push anyway.
+
+---
 
 ### ~~H1: Mojibake (character corruption)~~ ✅ Fixed (2026-04-19)
 
