@@ -106,6 +106,11 @@ class DockerService:
                 with open(credentials_src, "rb") as f:
                     creds_data = f.read()
                 import tarfile, io
+                # Ensure the target directory exists before put_archive
+                container.exec_run(
+                    ["bash", "-c", "mkdir -p /home/xolvien/.claude"],
+                    workdir="/workspace",
+                )
                 tar_buf = io.BytesIO()
                 with tarfile.open(fileobj=tar_buf, mode='w') as tar:
                     info = tarfile.TarInfo(name='.credentials.json')
@@ -115,7 +120,7 @@ class DockerService:
                 tar_buf.seek(0)
                 container.put_archive('/home/xolvien/.claude/', tar_buf)
                 container.exec_run(
-                    ["bash", "-c", "chown xolvien:xolvien /home/xolvien/.claude/.credentials.json"],
+                    ["bash", "-c", "chown -R xolvien:xolvien /home/xolvien/.claude"],
                     workdir="/workspace",
                 )
 

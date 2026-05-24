@@ -18,15 +18,27 @@ from app.services.docker_service import get_docker_service
 
 # Python script for text-only generation (prompt generation)
 _RUNNER_SCRIPT = """\
-import subprocess, sys, os
+import subprocess, sys, os, pwd, threading, time
 prompt = open('/tmp/xolvien_prompt.txt', encoding='utf-8').read()
-env = {**os.environ, 'HOME': '/root'}
+try:
+    pw = pwd.getpwnam('xolvien')
+    home = pw.pw_dir
+except KeyError:
+    home = '/root'
+env = {**os.environ, 'HOME': home}
 proc = subprocess.Popen(
     ['claude', '-p', prompt, '--output-format', 'text'],
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     env=env,
 )
+def _keepalive():
+    while proc.poll() is None:
+        time.sleep(10)
+        if proc.poll() is None:
+            sys.stdout.buffer.write(b'[Claude] ...\n')
+            sys.stdout.buffer.flush()
+threading.Thread(target=_keepalive, daemon=True).start()
 for chunk in iter(lambda: proc.stdout.read(512), b''):
     sys.stdout.buffer.write(chunk)
     sys.stdout.buffer.flush()
@@ -81,6 +93,19 @@ proc = subprocess.Popen(
     cwd='/workspace/repo',
     preexec_fn=preexec,
 )
+
+# Emit a keepalive line every 10 seconds while Claude is silent so the
+# stream never goes quiet long enough to trigger chunk_timeout.
+import threading, time
+def _keepalive():
+    while proc.poll() is None:
+        time.sleep(10)
+        if proc.poll() is None:
+            sys.stdout.buffer.write(b'[Claude] ...\n')
+            sys.stdout.buffer.flush()
+t = threading.Thread(target=_keepalive, daemon=True)
+t.start()
+
 for chunk in iter(lambda: proc.stdout.read(512), b''):
     sys.stdout.buffer.write(chunk)
     sys.stdout.buffer.flush()
@@ -310,6 +335,7 @@ README:
             task.container_id,
             "python3 /tmp/xolvien_runner.py",
             "/workspace/repo",
+            chunk_timeout=120.0,
         ):
             yield chunk
 
@@ -462,6 +488,7 @@ README:
             task.container_id,
             "python3 /tmp/xolvien_runner.py",
             "/workspace/repo",
+            chunk_timeout=120.0,
         ):
             yield chunk
 
@@ -528,6 +555,7 @@ README:
                 task.container_id,
                 "python3 /tmp/xolvien_runner.py",
                 "/workspace/repo",
+                chunk_timeout=120.0,
             ):
                 yield chunk
                 full_response += chunk
@@ -581,7 +609,7 @@ README:
             instruction.completed_at = datetime.utcnow()
             instruction.error_message = error_msg
             instruction.exit_code = 1
-            task.status = TaskStatus.IDLE
+            task.status = TaskStatus.FAILED
             await db.commit()
 
             log = TaskLog(
