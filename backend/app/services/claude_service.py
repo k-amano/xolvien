@@ -34,7 +34,7 @@ proc = subprocess.Popen(
 )
 def _keepalive():
     while proc.poll() is None:
-        time.sleep(10)
+        time.sleep(3)
         if proc.poll() is None:
             sys.stdout.buffer.write(b'[Claude] ...\n')
             sys.stdout.buffer.flush()
@@ -99,7 +99,7 @@ proc = subprocess.Popen(
 import threading, time
 def _keepalive():
     while proc.poll() is None:
-        time.sleep(10)
+        time.sleep(3)
         if proc.poll() is None:
             sys.stdout.buffer.write(b'[Claude] ...\n')
             sys.stdout.buffer.flush()
