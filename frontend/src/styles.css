@@ -503,27 +503,32 @@ button:disabled {
   width: 100%;
   flex: 1;
   min-height: 80px;
-  padding: 10px 12px;
-  font-family: inherit;
+  padding: 10px 14px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 0.875rem;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #f8fafc;
-  color: #1a1a2e;
+  border: none;
+  border-radius: 0;
+  background: #0d1117;
+  color: #e6edf3;
   resize: vertical;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
   outline: none;
+  box-shadow: none;
+  line-height: 1.6;
 }
 
 .instruction-textarea:focus {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-  background: #ffffff;
+  outline: none;
+  box-shadow: none;
+  background: #0d1117;
 }
 
 .instruction-textarea:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.instruction-textarea::placeholder {
+  color: #6e7681;
 }
 
 .instruction-footer {

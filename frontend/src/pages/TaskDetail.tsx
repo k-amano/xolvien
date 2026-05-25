@@ -174,6 +174,8 @@ export default function TaskDetail() {
   const [, setIntegrationTestCaseItems] = useState<TestCaseItem[]>([])
   const [, setE2ETestCaseItems] = useState<TestCaseItem[]>([])
   const [confirmedPrompt, setConfirmedPrompt] = useState('')
+  const [inputTab, setInputTab] = useState<'write' | 'preview'>('write')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Chat history (append-only)
   const [chatEntries, setChatEntries] = useState<ChatEntry[]>([])
@@ -2067,18 +2069,42 @@ export default function TaskDetail() {
     return null
   }
 
+  function insertMarkdown(before: string, after = '') {
+    const el = textareaRef.current
+    if (!el) return
+    const start = el.selectionStart
+    const end = el.selectionEnd
+    const selected = instruction.slice(start, end)
+    const newText = instruction.slice(0, start) + before + selected + after + instruction.slice(end)
+    setInstruction(newText)
+    requestAnimationFrame(() => {
+      el.focus()
+      const cursor = start + before.length + selected.length + after.length
+      el.setSelectionRange(cursor, cursor)
+    })
+  }
+
+  function renderMarkdownPreview(text: string): string {
+    return text
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/^#{3} (.+)$/gm, '<h3 style="margin:8px 0 4px;font-size:0.9rem;color:#e2e8f0">$1</h3>')
+      .replace(/^#{2} (.+)$/gm, '<h2 style="margin:10px 0 4px;font-size:1rem;color:#e2e8f0">$1</h2>')
+      .replace(/^# (.+)$/gm, '<h1 style="margin:10px 0 4px;font-size:1.1rem;color:#e2e8f0">$1</h1>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/`([^`]+)`/g, '<code style="background:#1e293b;padding:1px 4px;border-radius:3px;font-family:monospace;font-size:0.85em;color:#93c5fd">$1</code>')
+      .replace(/^```[\s\S]*?```$/gm, (m) => {
+        const inner = m.replace(/^```[^\n]*\n/, '').replace(/```$/, '')
+        return `<pre style="background:#1e293b;padding:8px;border-radius:4px;overflow-x:auto;margin:6px 0"><code style="font-family:monospace;font-size:0.82rem;color:#93c5fd">${inner}</code></pre>`
+      })
+      .replace(/^- (.+)$/gm, '<li style="margin:2px 0;padding-left:4px">$1</li>')
+      .replace(/(<li[^>]*>.*<\/li>\n?)+/g, (m) => `<ul style="margin:4px 0;padding-left:20px">${m}</ul>`)
+      .replace(/\n\n/g, '</p><p style="margin:6px 0">')
+      .replace(/^(?!<[huplo]|<pre)(.+)$/gm, '<p style="margin:4px 0">$1</p>')
+  }
+
   function renderInputArea() {
     const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
-
-    const wrapperStyle: React.CSSProperties = {
-      borderTop: '1px solid #1e293b',
-      padding: '10px 12px',
-      flexShrink: 0,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '8px',
-      background: '#0a0f1e',
-    }
 
     // Determine phase from chatEntries
     const isInitialPhase = chatEntries.length === 0 ||
@@ -2101,9 +2127,9 @@ export default function TaskDetail() {
     else if (isPromptPhase) placeholder = t.feedbackPlaceholder
     else if (isTestOrReviewStep) placeholder = t.inputDisabledPlaceholder
 
-    // Textarea is disabled during test/review steps (no free-text input) or while busy
     const textareaDisabled = isBusy || task?.status !== 'idle' ||
       (isTestOrReviewStep && !isPromptPhase)
+    const isDisabledNoInput = isTestOrReviewStep && !isPromptPhase
 
     // Buttons for each phase
     let buttons: React.ReactNode = null
@@ -2136,30 +2162,177 @@ export default function TaskDetail() {
         </>
       )
     } else {
-      // test / review steps — delegate to renderActionButtons
       buttons = renderActionButtons()
     }
 
+    const displayValue = isDisabledNoInput ? '' : instruction
+
     return (
-      <div style={wrapperStyle}>
-        <textarea
-          className="instruction-textarea"
-          value={textareaDisabled && !isPromptPhase && isTestOrReviewStep ? '' : instruction}
-          onChange={e => setInstruction(e.target.value)}
-          placeholder={placeholder}
-          disabled={textareaDisabled}
-          style={{
-            minHeight: '60px',
-            marginBottom: 0,
-            resize: 'vertical',
-            opacity: isTestOrReviewStep && !isPromptPhase ? 0.35 : 1,
-          }}
-        />
-        <div className="instruction-footer" style={{ margin: 0 }}>
-          {buttons}
-          {task?.status !== 'idle' && statusMessage && (
-            <span className="instruction-status">{statusMessage}</span>
+      <div style={{
+        borderTop: '2px solid #1e293b',
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        background: '#0d1117',
+      }}>
+        {/* Tab bar + toolbar */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          borderBottom: '1px solid #21262d',
+          padding: '0 8px',
+          gap: 0,
+        }}>
+          {/* Write / Preview tabs */}
+          <button
+            onClick={() => !isDisabledNoInput && setInputTab('write')}
+            style={{
+              background: 'none',
+              border: 'none',
+              borderBottom: inputTab === 'write' ? '2px solid #f78166' : '2px solid transparent',
+              color: inputTab === 'write' ? '#e6edf3' : '#8b949e',
+              padding: '8px 12px',
+              fontSize: '0.8rem',
+              fontWeight: inputTab === 'write' ? 600 : 400,
+              cursor: isDisabledNoInput ? 'default' : 'pointer',
+              marginBottom: '-1px',
+            }}
+          >
+            Write
+          </button>
+          <button
+            onClick={() => !isDisabledNoInput && instruction.trim() && setInputTab('preview')}
+            style={{
+              background: 'none',
+              border: 'none',
+              borderBottom: inputTab === 'preview' ? '2px solid #f78166' : '2px solid transparent',
+              color: inputTab === 'preview' ? '#e6edf3' : '#8b949e',
+              padding: '8px 12px',
+              fontSize: '0.8rem',
+              fontWeight: inputTab === 'preview' ? 600 : 400,
+              cursor: isDisabledNoInput || !instruction.trim() ? 'default' : 'pointer',
+              marginBottom: '-1px',
+              opacity: isDisabledNoInput || !instruction.trim() ? 0.4 : 1,
+            }}
+          >
+            Preview
+          </button>
+
+          {/* Markdown toolbar — only in write mode */}
+          {inputTab === 'write' && !isDisabledNoInput && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', marginLeft: '8px' }}>
+              {[
+                { label: 'B', title: 'Bold', action: () => insertMarkdown('**', '**') },
+                { label: 'I', title: 'Italic', action: () => insertMarkdown('*', '*') },
+                { label: '<>', title: 'Inline code', action: () => insertMarkdown('`', '`') },
+                { label: '```', title: 'Code block', action: () => insertMarkdown('```\n', '\n```') },
+                { label: '—', title: 'Divider', action: () => insertMarkdown('\n---\n') },
+                { label: '•', title: 'List item', action: () => insertMarkdown('- ') },
+              ].map(btn => (
+                <button
+                  key={btn.label}
+                  title={btn.title}
+                  onClick={btn.action}
+                  disabled={textareaDisabled}
+                  style={{
+                    background: 'none',
+                    border: '1px solid transparent',
+                    borderRadius: '4px',
+                    color: '#8b949e',
+                    padding: '2px 6px',
+                    fontSize: btn.label === '```' ? '0.65rem' : '0.78rem',
+                    fontWeight: btn.label === 'B' ? 700 : btn.label === 'I' ? 400 : 500,
+                    fontStyle: btn.label === 'I' ? 'italic' : 'normal',
+                    fontFamily: ['<>', '```'].includes(btn.label) ? 'monospace' : 'inherit',
+                    cursor: 'pointer',
+                    lineHeight: 1,
+                  }}
+                  onMouseEnter={e => { if (!textareaDisabled) (e.currentTarget as HTMLButtonElement).style.background = '#21262d' }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+                >
+                  {btn.label}
+                </button>
+              ))}
+            </div>
           )}
+
+          {/* Status message floated right */}
+          {task?.status !== 'idle' && statusMessage && (
+            <span style={{ marginLeft: 'auto', fontSize: '0.75rem', color: '#6e7681', fontStyle: 'italic', paddingRight: '8px' }}>
+              {statusMessage}
+            </span>
+          )}
+        </div>
+
+        {/* Write/Preview area */}
+        {inputTab === 'write' ? (
+          <textarea
+            ref={textareaRef}
+            className="instruction-textarea"
+            value={displayValue}
+            onChange={e => {
+              setInstruction(e.target.value)
+              // auto-switch back to write if user types
+              if (inputTab !== 'write') setInputTab('write')
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Tab' && !e.shiftKey) {
+                e.preventDefault()
+                const el = e.currentTarget
+                const start = el.selectionStart
+                const end = el.selectionEnd
+                const newVal = instruction.slice(0, start) + '  ' + instruction.slice(end)
+                setInstruction(newVal)
+                requestAnimationFrame(() => el.setSelectionRange(start + 2, start + 2))
+              }
+            }}
+            placeholder={placeholder}
+            disabled={textareaDisabled}
+            style={{
+              minHeight: '120px',
+              maxHeight: '300px',
+              marginBottom: 0,
+              resize: 'vertical',
+              opacity: isDisabledNoInput ? 0.35 : 1,
+              border: 'none',
+              borderRadius: 0,
+              background: '#0d1117',
+              color: '#e6edf3',
+              outline: 'none',
+              boxShadow: 'none',
+              padding: '10px 14px',
+              fontSize: '0.875rem',
+              lineHeight: 1.6,
+              fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+            }}
+          />
+        ) : (
+          <div
+            style={{
+              minHeight: '120px',
+              maxHeight: '300px',
+              overflowY: 'auto',
+              padding: '10px 14px',
+              fontSize: '0.875rem',
+              lineHeight: 1.6,
+              color: '#e6edf3',
+              background: '#0d1117',
+            }}
+            // eslint-disable-next-line react/no-danger
+            dangerouslySetInnerHTML={{ __html: instruction.trim() ? renderMarkdownPreview(instruction) : `<span style="color:#6e7681">${placeholder}</span>` }}
+          />
+        )}
+
+        {/* Footer with action buttons */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '8px 10px',
+          borderTop: '1px solid #21262d',
+          background: '#0d1117',
+        }}>
+          {buttons}
         </div>
       </div>
     )

@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-05-24
+**Last updated**: 2026-05-25
 
 See `spec.md` for currently implemented features.
 
@@ -232,15 +232,14 @@ Results from an external agent code review.
 
 ---
 
-## Input Field Enhancement (Markdown Preview)
+## ~~Input Field Enhancement (Markdown Preview)~~ ✅ Fixed (2026-05-25)
 
-The current textarea does not provide a comfortable writing experience comparable to GitHub Issues.
-
-**Implementation plan:**
-- Significantly expand the input field; default height 4–6+ lines.
-- Add "Write / Preview" tab toggle with real-time Markdown preview.
-- Use `react-markdown` for rendering.
-- Support common Markdown: code blocks, lists, headings.
+- Replaced the single textarea with a GitHub Issue-style input area.
+- Added **Write / Preview** tab toggle. Preview renders the input as Markdown (headings, bold/italic, inline code, code blocks, lists).
+- Added a **Markdown toolbar** (Write mode only): Bold, Italic, Inline code, Code block, Divider, List item. Each button wraps the selected text or inserts at the cursor.
+- Textarea minimum height raised to 120 px (max 300 px, resizable). Tab key inserts 2 spaces.
+- Status message moved to the tab bar right edge to reduce visual noise.
+- No external library; inline renderer implemented in `renderMarkdownPreview()` in `TaskDetail.tsx`.
 
 ---
 

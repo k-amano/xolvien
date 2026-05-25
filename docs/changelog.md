@@ -2,6 +2,33 @@
 
 ---
 
+## 2026-05-25
+
+### Input Field Enhancement (Markdown Preview)
+
+**Changes:**
+
+- Frontend `pages/TaskDetail.tsx`: Replaced the plain textarea with a GitHub Issue-style input component.
+  - Added **Write / Preview** tab toggle above the input area.
+    - **Write** tab: editable textarea (monospace font, dark theme `#0d1117`).
+    - **Preview** tab: inline Markdown render via `renderMarkdownPreview()` (headings `#`/`##`/`###`, bold `**`, italic `*`, inline code, fenced code blocks, unordered lists). Preview is disabled when the textarea is empty or in a disabled phase.
+  - Added a **Markdown toolbar** visible in Write mode only (hidden when textarea is disabled):
+    - **B** — wraps selection/cursor in `**…**`
+    - *I* — wraps in `*…*`
+    - `<>` — wraps in backtick inline code
+    - ` ``` ` — wraps in fenced code block
+    - `—` — inserts `\n---\n`
+    - `•` — inserts `- ` at cursor
+    - `insertMarkdown()` helper: inserts before/after selection, then restores focus and sets cursor after the inserted text.
+  - Textarea minimum height raised from 60 px to 120 px; maximum height capped at 300 px (still resizable).
+  - Tab key now inserts 2 spaces instead of moving focus.
+  - Status message (container state) moved from below the textarea to the tab bar right edge.
+  - No external library added; no `react-markdown` dependency.
+
+- Frontend `styles.css`: Updated `.instruction-textarea` defaults to dark theme (`background: #0d1117`, `color: #e6edf3`, `border: none`, `border-radius: 0`, monospace font). Focus state no longer shows a blue box-shadow (border is handled by the container). Added `::placeholder` rule (`color: #6e7681`).
+
+---
+
 ## 2026-05-24
 
 ### Bug Fixes: Stream Silence, Keepalive, Error Propagation
