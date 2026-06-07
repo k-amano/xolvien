@@ -23,6 +23,28 @@ See `spec.md` for currently implemented features.
 
 ---
 
+### H4: Permission errors loop indefinitely during execution
+
+During `execute_instruction`, Claude runs as root inside the container and hits permission errors on `/workspace/repo` (owned by the `xolvien` user). The error and git failure repeat in a loop with no automatic stop — the user must press Stop manually.
+
+**Requirements:**
+- Identify why `_RUNNER_SCRIPT_EXECUTE` runs as root instead of dropping to the `xolvien` user.
+- Fix privilege drop so Claude writes files as `xolvien`.
+- Add a loop-detection safeguard: abort after N consecutive identical errors.
+
+---
+
+### H5: Clarify answers require full re-typing of question and answer
+
+When Claude asks a clarifying question with numbered options (e.g. `1. React  2. Vue`), the user must type the full answer. Single-option shortcuts (typing `1` or `2`) are not recognized.
+
+**Requirements:**
+- Detect when Claude's question contains a numbered list of options.
+- Allow the user to reply with just the option number (e.g. `1`).
+- Expand the shortcut to the full option text before sending to the backend, or handle it server-side.
+
+---
+
 ### Error Display
 
 When an error occurs (timeout, Claude failure, container error, etc.), it must be immediately visible to the user in an unmissable way.
