@@ -426,7 +426,7 @@ export default function TaskDetail() {
             seenLogIdsRef.current.add(log.id)
             return { kind: 'log', data: log }
           })
-        setLogEntries(entries)
+        setLogEntries(prev => [...entries, ...prev.filter(e => e.kind === 'stream')])
         requestAnimationFrame(() => {
           const el = logViewerRef.current
           if (el) el.scrollTop = el.scrollHeight
