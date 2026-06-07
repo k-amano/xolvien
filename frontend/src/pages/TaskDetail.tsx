@@ -2558,18 +2558,13 @@ export default function TaskDetail() {
                     )
                   } else {
                     const HIDDEN_PREFIXES = ['[XOLVIEN_PROGRESS]', '[XOLVIEN_TC_START]', '[XOLVIEN_TC_DONE]']
-                    const lines = entry.text
-                      ? entry.text.split('\n').filter(l => !HIDDEN_PREFIXES.some(p => l.startsWith(p)))
-                      : []
+                    const displayText = entry.text
+                      ? entry.text.split('\n').filter(l => !HIDDEN_PREFIXES.some(p => l.startsWith(p))).join('\n')
+                      : ''
                     return (
-                      <div key={entry.key}>
-                        <p className="log-stream-chunk" style={{ color: '#6b7280', fontStyle: 'italic', margin: '1px 0' }}>{t.cliStarting}</p>
-                        {lines.map((line, lineIdx) => (
-                          line.trim()
-                            ? <p key={lineIdx} className="log-stream-chunk" style={{ margin: '1px 0' }}>{line}</p>
-                            : null
-                        ))}
-                      </div>
+                      <p key={entry.key} className="log-stream-chunk">
+                        {displayText || t.cliStarting}
+                      </p>
                     )
                   }
                 })
