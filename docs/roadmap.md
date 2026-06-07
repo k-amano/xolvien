@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-06-07
+**Last updated**: 2026-06-07 (session 2)
 
 See `spec.md` for currently implemented features.
 
@@ -10,10 +10,16 @@ See `spec.md` for currently implemented features.
 
 ### ~~Real-time Log Display (Claude Code style)~~ ✅ Fixed (2026-06-07)
 
-- `execute_instruction()` now uses `_RUNNER_SCRIPT_EXECUTE` which runs Claude with `--output-format stream-json --include-partial-messages --verbose`.
-- Stream events are parsed line-by-line: thinking blocks → `[Thinking] ...`, tool calls → `[Tool: X] summary`, tool results → `[Result] ...`, text deltas → streamed directly.
-- Left pane shows all Claude activity in real time during implementation.
+- `execute_instruction()` uses `_RUNNER_SCRIPT_EXECUTE`: Claude runs with `--output-format stream-json --include-partial-messages --verbose`.
+- Stream events parsed line-by-line: thinking → `[Thinking] ...`, tool calls → `[Tool: X]`, results → `[Result] ...`, text deltas streamed directly.
+- `clarify_requirements()` and `generate_prompt()` also add stream entries to the left pane so all Claude activity is visible in real time.
+- Left pane is **append-only**: once displayed, content is never removed or replaced.
+- `Starting Claude Code CLI...` header is always shown at the top of each stream entry and remains visible throughout (keepalive `[Claude] ...` lines are filtered out).
+- Status banners removed from the left pane entirely — left pane shows Claude responses only.
+- `[Thinking]`, `[Tool:]`, `[Result]`, `[Claude] ...` lines filtered from the right pane prompt display; only the final prompt text is shown there.
 - WebSocket logs with `source == 'claude'` or `source == 'git'` are filtered out on the frontend to avoid duplication with the stream.
+
+**Known issue (separate backlog item H4):** During `execute_instruction`, permission errors and git failures can loop without stopping. Root cause: xolvien user permissions in the container. Must be stopped manually.
 
 ---
 
