@@ -94,8 +94,6 @@ proc = subprocess.Popen(
     preexec_fn=preexec,
 )
 
-# Emit a keepalive line every 10 seconds while Claude is silent so the
-# stream never goes quiet long enough to trigger chunk_timeout.
 import threading, time
 def _keepalive():
     while proc.poll() is None:
@@ -109,6 +107,157 @@ t.start()
 for chunk in iter(lambda: proc.stdout.read(512), b''):
     sys.stdout.buffer.write(chunk)
     sys.stdout.buffer.flush()
+proc.wait()
+sys.exit(proc.returncode)
+"""
+
+# Python script for execute_instruction: uses stream-json to show real-time tool/thinking/text events.
+# Used only by execute_instruction() — other callers use _RUNNER_SCRIPT_AGENT (text output).
+_RUNNER_SCRIPT_EXECUTE = """\
+import subprocess, sys, os, shutil, pwd, json
+
+prompt = open('/tmp/xolvien_prompt.txt', encoding='utf-8').read()
+
+try:
+    pw = pwd.getpwnam('xolvien')
+    uid, gid, home = pw.pw_uid, pw.pw_gid, pw.pw_dir
+except KeyError:
+    uid = gid = None
+    home = '/root'
+
+if uid is not None:
+    src, dst = '/root/.ssh', f'{home}/.ssh'
+    if os.path.exists(src) and not os.path.exists(dst):
+        shutil.copytree(src, dst, symlinks=True)
+        for dirpath, dirs, files in os.walk(dst):
+            os.chown(dirpath, uid, gid)
+            for f in files:
+                try:
+                    os.chown(os.path.join(dirpath, f), uid, gid)
+                except Exception:
+                    pass
+
+    def drop_privs():
+        os.setgroups([gid])
+        os.setgid(gid)
+        os.setuid(uid)
+
+    cmd = [
+        'claude', '--dangerously-skip-permissions', '-p', prompt,
+        '--output-format', 'stream-json',
+        '--include-partial-messages', '--verbose',
+    ]
+    env = {**os.environ, 'HOME': home}
+    preexec = drop_privs
+else:
+    cmd = [
+        'claude', '-p', prompt,
+        '--output-format', 'stream-json',
+        '--include-partial-messages', '--verbose',
+    ]
+    env = {**os.environ, 'HOME': '/root'}
+    preexec = None
+
+proc = subprocess.Popen(
+    cmd,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    env=env,
+    cwd='/workspace/repo',
+    preexec_fn=preexec,
+)
+
+def emit(line):
+    sys.stdout.buffer.write((line + '\\n').encode('utf-8'))
+    sys.stdout.buffer.flush()
+
+_tool_name = {}
+_tool_input = {}
+_in_thinking = {}
+_thinking_buf = {}
+
+buf = b''
+for chunk in iter(lambda: proc.stdout.read(256), b''):
+    buf += chunk
+    while b'\\n' in buf:
+        raw_line, buf = buf.split(b'\\n', 1)
+        line_str = raw_line.decode('utf-8', errors='replace').strip()
+        if not line_str:
+            continue
+        try:
+            obj = json.loads(line_str)
+        except Exception:
+            emit(line_str)
+            continue
+
+        t = obj.get('type', '')
+
+        if t == 'stream_event':
+            ev = obj.get('event', {})
+            ev_type = ev.get('type', '')
+
+            if ev_type == 'content_block_start':
+                idx = ev.get('index', 0)
+                block = ev.get('content_block', {})
+                btype = block.get('type', '')
+                if btype == 'thinking':
+                    _in_thinking[idx] = True
+                    _thinking_buf[idx] = ''
+                elif btype == 'tool_use':
+                    _tool_name[idx] = block.get('name', 'Tool')
+                    _tool_input[idx] = ''
+
+            elif ev_type == 'content_block_delta':
+                idx = ev.get('index', 0)
+                delta = ev.get('delta', {})
+                dtype = delta.get('type', '')
+                if dtype == 'thinking_delta':
+                    _thinking_buf[idx] = _thinking_buf.get(idx, '') + delta.get('thinking', '')
+                elif dtype == 'text_delta':
+                    text = delta.get('text', '')
+                    if text:
+                        emit(text)
+                elif dtype == 'input_json_delta':
+                    _tool_input[idx] = _tool_input.get(idx, '') + delta.get('partial_json', '')
+
+            elif ev_type == 'content_block_stop':
+                idx = ev.get('index', 0)
+                if idx in _in_thinking:
+                    thinking = _thinking_buf.get(idx, '').strip()
+                    if thinking:
+                        emit('[Thinking] ' + thinking.replace('\\n', ' '))
+                    del _in_thinking[idx]
+                    _thinking_buf.pop(idx, None)
+                elif idx in _tool_name:
+                    name = _tool_name.pop(idx)
+                    raw_input = _tool_input.pop(idx, '')
+                    try:
+                        inp = json.loads(raw_input) if raw_input.strip() else {}
+                    except Exception:
+                        inp = {}
+                    summary = ''
+                    for key in ('command', 'path', 'file_path', 'description', 'query', 'pattern'):
+                        if key in inp:
+                            summary = str(inp[key])[:120]
+                            break
+                    if not summary and inp:
+                        summary = str(next(iter(inp.values()), ''))[:120]
+                    emit(f'[Tool: {name}] {summary}' if summary else f'[Tool: {name}]')
+
+        elif t == 'user':
+            msg = obj.get('message', {})
+            for item in msg.get('content', []):
+                if item.get('type') == 'tool_result':
+                    content = item.get('content', '')
+                    if isinstance(content, str) and content.strip():
+                        preview = content.strip()[:300]
+                        emit('[Result] ' + preview)
+                    elif isinstance(content, list):
+                        for c in content:
+                            if c.get('type') == 'text' and c.get('text', '').strip():
+                                emit('[Result] ' + c['text'].strip()[:300])
+                                break
+
 proc.wait()
 sys.exit(proc.returncode)
 """
@@ -208,6 +357,18 @@ class ClaudeCodeService:
             f"\""
         )
         self.docker_service.execute_command(container_id, cmd, "/workspace")
+
+    def reset_workspace(self, container_id: str) -> None:
+        """Delete all files under /workspace/repo and reinitialise a bare git repo."""
+        cmd = (
+            "rm -rf /workspace/repo && "
+            "mkdir -p /workspace/repo && "
+            "git init /workspace/repo && "
+            "git -C /workspace/repo commit --allow-empty -m 'initial'"
+        )
+        exit_code, _, stderr = self.docker_service.execute_command(container_id, cmd, "/workspace")
+        if exit_code != 0:
+            raise RuntimeError(f"reset_workspace failed: {stderr}")
 
     async def clarify_requirements(
         self,
@@ -416,17 +577,13 @@ Past instructions for this task:
 {feedback}
 """
             meta_prompt += """
-## Steps
+## Instructions
 
-1. Identify files related to the user's instruction from the file list above
-2. Read those files to understand the current implementation accurately
-3. Generate the best prompt to pass to the Claude Code CLI agent
-
-## Output rules
+Based on the workspace information above, generate the best prompt to pass to the Claude Code CLI agent.
 
 The generated prompt must include:
-- Exact file paths (based on what you read)
-- Specific changes to make given the current implementation
+- Relevant file paths from the file list above
+- Specific changes to make
 - Verification criteria if needed
 
 Note: The execution agent reads/writes files and runs commands automatically. Do not specify output format.
@@ -463,17 +620,13 @@ README:
 {feedback}
 """
             meta_prompt += """
-## 手順
+## 指示
 
-1. まず上記のファイル一覧から、ユーザーの指示に関係するファイルを特定してください
-2. 該当ファイルを読み込み、現在の実装を正確に把握してください
-3. その上で、Claude Code CLIエージェントへ渡す最適なプロンプトを生成してください
-
-## 出力ルール
+上記のワークスペース情報をもとに、Claude Code CLIエージェントへ渡す最適なプロンプトを生成してください。
 
 生成するプロンプトには以下を含めてください：
-- 対象ファイルの正確なパス（読み込んだ内容に基づく）
-- 現状の実装を踏まえた具体的な変更内容
+- ファイル一覧にある関連ファイルのパス
+- 具体的な変更内容
 - 必要であれば動作確認の観点
 
 注意: 実行エージェントはファイルの読み書きやコマンド実行を自動で行います。出力形式の指定は不要です。
@@ -482,7 +635,7 @@ README:
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", meta_prompt)
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT)
 
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
@@ -546,7 +699,7 @@ README:
 
             # Write prompt and agent runner script into the container
             self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", instruction_content)
-            self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
+            self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_EXECUTE)
 
             yield "[Claude] Running Claude Code CLI...\n\n"
 

@@ -63,6 +63,17 @@ export async function stopTask(id: number): Promise<Task> {
   return res.data
 }
 
+export async function resetWorkspace(taskId: number): Promise<void> {
+  const res = await fetch(`/api/v1/tasks/${taskId}/instructions/reset-workspace`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`HTTP ${res.status}: ${text}`)
+  }
+}
+
 export async function gitPushStream(
   taskId: number,
   onChunk: (text: string) => void,

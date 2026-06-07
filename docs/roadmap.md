@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-05-25
+**Last updated**: 2026-06-07
 
 See `spec.md` for currently implemented features.
 
@@ -8,15 +8,12 @@ See `spec.md` for currently implemented features.
 
 ## Priority: High (critical quality issues)
 
-### Real-time Log Display (Claude Code style)
+### ~~Real-time Log Display (Claude Code style)~~ ✅ Fixed (2026-06-07)
 
-Currently the left pane only shows output after Claude emits a chunk. Between tool calls (file reads, writes, bash) Claude can be silent, leaving the user with no feedback.
-
-**Requirements:**
-- Stream every line of Claude's output to the left pane in real time, the same way Claude Code CLI displays it in the terminal — tool calls, file operations, thinking steps, and final output all visible as they happen.
-- No silence longer than 3 seconds at any point during execution.
-
-**Note:** The current keepalive `[Claude] ...\n` workaround emits a dot every 3s but does not show what Claude is actually doing. The goal is to show real activity, not a heartbeat.
+- `execute_instruction()` now uses `_RUNNER_SCRIPT_EXECUTE` which runs Claude with `--output-format stream-json --include-partial-messages --verbose`.
+- Stream events are parsed line-by-line: thinking blocks → `[Thinking] ...`, tool calls → `[Tool: X] summary`, tool results → `[Result] ...`, text deltas → streamed directly.
+- Left pane shows all Claude activity in real time during implementation.
+- WebSocket logs with `source == 'claude'` or `source == 'git'` are filtered out on the frontend to avoid duplication with the stream.
 
 ---
 
@@ -29,6 +26,15 @@ When an error occurs (timeout, Claude failure, container error, etc.), it must b
 - The banner must appear immediately when the error occurs — not after a delay.
 - The Git Push button and all other action buttons must be disabled until the error is resolved.
 - The current `[ERROR]` line in the log stream is insufficient — users miss it and proceed with push anyway.
+
+---
+
+### ~~Implement Redo Flow (Modify / Reset & Rebuild)~~ ✅ Fixed (2026-06-07)
+
+- When a prior completed instruction exists, the Implement step now shows two buttons instead of one: **Modify** and **Reset & Rebuild**.
+- **Modify**: Keeps `/workspace/repo` intact and starts the clarify → prompt generation → execute flow so Claude makes targeted changes to existing code.
+- **Reset & Rebuild**: Calls `POST /reset-workspace` to delete all files under `/workspace/repo` and reinitialise a bare git repo, then starts the same clarify flow from scratch.
+- `handleStartClarify()` now resets `chatEntries` before starting, so the new instruction is not confused with the previous one.
 
 ---
 
@@ -63,10 +69,11 @@ Results from an external agent code review.
 - `package.json` check now runs before the Python check.
 - `requirements.txt` alone no longer implies Python (`pyproject.toml` / `setup.py` take priority).
 
-### CR-3: `generate_prompt()` runs with excess permissions in agent mode ❌ Won't fix
+### ~~CR-3: `generate_prompt()` runs with excess permissions in agent mode~~ ✅ Fixed (2026-06-07)
 
-- **Finding**: `generate_prompt()` uses `_RUNNER_SCRIPT_AGENT` (file writes allowed), risking unintended file modifications.
-- **Decision**: For large projects, Claude must be able to read relevant files to generate an accurate prompt — agent mode is required. Switching to `-p` mode would break this capability. Risk is acknowledged; no alternative available. Design decision documented in `spec.md` §6.5.
+- Reverted `generate_prompt()` to use `_RUNNER_SCRIPT` (text mode, `--output-format text`, no tool execution).
+- Root cause of the regression: agent mode caused Claude to emit tool execution logs (e.g. `ls -la` output) into the prompt text stream.
+- File list, git log, and README are pre-fetched by the backend and embedded in the meta-prompt, so agent mode is not needed.
 
 ### CR-4: Dockerfile Node.js version ❌ N/A (already fixed)
 

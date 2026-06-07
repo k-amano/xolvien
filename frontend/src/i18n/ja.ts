@@ -192,6 +192,8 @@ export const ja = {
   inputPlaceholder: '指示を入力してください...',
   inputDisabledPlaceholder: 'このフェーズではコメント入力は使用しません',
   sendInstruction: '送信',
+  modify: '修正',
+  resetAndRebuild: '最初から作り直す',
   sendAnswer: '回答を送信',
   skipAndGenerate: '次へ進む',
   generatePromptDirect: 'プロンプトを生成',

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, generateTestCasesStream, generateIntegrationTestCasesStream, generateE2ETestCasesStream, runUnitTestsStream, runIntegrationTestsStream, runE2ETestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, resetWorkspace, generateTestCasesStream, generateIntegrationTestCasesStream, generateE2ETestCasesStream, runUnitTestsStream, runIntegrationTestsStream, runE2ETestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
 import type { TestCaseItem } from '../types'
 import { useLang } from '../i18n'
 
@@ -420,10 +420,12 @@ export default function TaskDetail() {
   useEffect(() => {
     getLogs(taskId, 500)
       .then(logs => {
-        const entries: LogEntry[] = logs.map(log => {
-          seenLogIdsRef.current.add(log.id)
-          return { kind: 'log', data: log }
-        })
+        const entries: LogEntry[] = logs
+          .filter(log => log.source !== 'claude' && log.source !== 'git')
+          .map(log => {
+            seenLogIdsRef.current.add(log.id)
+            return { kind: 'log', data: log }
+          })
         setLogEntries(entries)
         requestAnimationFrame(() => {
           const el = logViewerRef.current
@@ -453,6 +455,8 @@ export default function TaskDetail() {
         const log: TaskLog = parsed
         if (seenLogIdsRef.current.has(log.id)) return
         seenLogIdsRef.current.add(log.id)
+        // claude/git logs are already shown via the stream; skip them here to avoid duplication
+        if (log.source === 'claude' || log.source === 'git') return
         setLogEntries(prev => [...prev, { kind: 'log', data: log }])
       } catch {
         const fakeLog: TaskLog = {
@@ -483,12 +487,23 @@ export default function TaskDetail() {
 
   // ─── Handler functions ────────────────────────────────────────────────────
 
+  async function handleResetAndRebuild() {
+    if (!instruction.trim() || clarifying || generating) return
+    try {
+      await resetWorkspace(taskId)
+    } catch (err) {
+      setChatEntries(prev => [...prev, { type: 'error', message: `Reset failed: ${err instanceof Error ? err.message : String(err)}` }])
+      return
+    }
+    await handleStartClarify()
+  }
+
   async function handleStartClarify() {
     if (!instruction.trim() || clarifying || generating) return
     const userMsg = instruction.trim()
     setInstruction('')
 
-    setChatEntries(prev => [...prev, { type: 'user_instruction', content: userMsg }])
+    setChatEntries([{ type: 'user_instruction', content: userMsg }])
     setClarifying(true)
 
     let streamedText = ''
@@ -625,11 +640,16 @@ export default function TaskDetail() {
       instruction,
       (chunk) => { promptText += chunk },
       () => {
+        const cleaned = promptText
+          .split('\n')
+          .filter(line => line !== '[Claude] ...')
+          .join('\n')
+          .trim()
         setGenerating(false)
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'prompt_generated', content: promptText, confirmed: false }
+            ? { type: 'prompt_generated', content: cleaned, confirmed: false }
             : e
         ))
       },
@@ -666,11 +686,16 @@ export default function TaskDetail() {
       instruction,
       (chunk) => { promptText += chunk },
       () => {
+        const cleaned = promptText
+          .split('\n')
+          .filter(line => line !== '[Claude] ...')
+          .join('\n')
+          .trim()
         setGenerating(false)
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'prompt_generated', content: promptText, confirmed: false }
+            ? { type: 'prompt_generated', content: cleaned, confirmed: false }
             : e
         ))
       },
@@ -2107,10 +2132,12 @@ export default function TaskDetail() {
     const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
 
     // Determine phase from chatEntries
+    const lastEntry = chatEntries.length > 0 ? chatEntries[chatEntries.length - 1] : null
     const isInitialPhase = chatEntries.length === 0 ||
-      chatEntries.every(e => e.type === 'user_instruction')
-    const isClarifyMode = !isInitialPhase &&
-      chatEntries[chatEntries.length - 1].type === 'clarify_question'
+      chatEntries.every(e => e.type === 'user_instruction') ||
+      selectedStep === 'implement'
+    const isClarifyMode = selectedStep === 'implement' &&
+      (lastEntry?.type === 'clarify_question')
     const lastUnconfirmedPrompt = chatEntries.reduce<(ChatEntry & { type: 'prompt_generated' }) | null>(
       (last, e) => e.type === 'prompt_generated' && !e.confirmed ? e as ChatEntry & { type: 'prompt_generated' } : last, null)
     const isPromptPhase = !!lastUnconfirmedPrompt &&
@@ -2131,15 +2158,9 @@ export default function TaskDetail() {
       (isTestOrReviewStep && !isPromptPhase)
     const isDisabledNoInput = isTestOrReviewStep && !isPromptPhase
 
-    // Buttons for each phase
+    // Buttons for each phase (isClarifyMode / isPromptPhase take priority over isInitialPhase)
     let buttons: React.ReactNode = null
-    if (isInitialPhase) {
-      buttons = (
-        <button className="btn-primary" onClick={handleStartClarify} disabled={!canSend}>
-          {t.sendInstruction}
-        </button>
-      )
-    } else if (isClarifyMode) {
+    if (isClarifyMode) {
       buttons = (
         <>
           <button className="btn-primary" onClick={handleSendClarifyAnswer} disabled={!canSend}>
@@ -2160,6 +2181,21 @@ export default function TaskDetail() {
             {generating ? t.regenerating : t.regenerate}
           </button>
         </>
+      )
+    } else if (isInitialPhase) {
+      buttons = confirmedPrompt ? (
+        <>
+          <button className="btn-primary" onClick={handleStartClarify} disabled={!canSend}>
+            {t.modify}
+          </button>
+          <button className="btn-danger" onClick={handleResetAndRebuild} disabled={!canSend}>
+            {t.resetAndRebuild}
+          </button>
+        </>
+      ) : (
+        <button className="btn-primary" onClick={handleStartClarify} disabled={!canSend}>
+          {t.sendInstruction}
+        </button>
       )
     } else {
       buttons = renderActionButtons()
@@ -2495,11 +2531,13 @@ export default function TaskDetail() {
                       </p>
                     )
                   } else {
+                    const HIDDEN_PREFIXES = ['[XOLVIEN_PROGRESS]', '[XOLVIEN_TC_START]', '[XOLVIEN_TC_DONE]']
+                    const displayText = entry.text
+                      ? entry.text.split('\n').filter(l => !HIDDEN_PREFIXES.some(p => l.startsWith(p))).join('\n')
+                      : ''
                     return (
                       <p key={entry.key} className="log-stream-chunk">
-                        {entry.text
-                          ? entry.text.split('\n').filter(l => !l.startsWith('[XOLVIEN_PROGRESS]') && !l.startsWith('[XOLVIEN_TC_START]') && !l.startsWith('[XOLVIEN_TC_DONE]')).join('\n')
-                          : t.cliStarting}
+                        {displayText || t.cliStarting}
                       </p>
                     )
                   }

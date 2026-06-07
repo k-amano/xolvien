@@ -180,6 +180,8 @@ export const en = {
   inputPlaceholder: 'Enter instructions...',
   inputDisabledPlaceholder: 'Input is not used in this phase',
   sendInstruction: 'Send',
+  modify: 'Modify',
+  resetAndRebuild: 'Reset & Rebuild',
   sendAnswer: 'Send Answer',
   skipAndGenerate: 'Proceed',
   generatePromptDirect: 'Generate Prompt',

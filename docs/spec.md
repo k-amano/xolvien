@@ -1,6 +1,6 @@
 # Xolvien — Current Specification
 
-**Last updated**: 2026-05-24 (keepalive thread, FAILED status on error, credentials copy fix)
+**Last updated**: 2026-06-07 (implement redo/reset flow, real-time log display via stream-json)
 
 This document records the specification as currently implemented. Unimplemented future features are described in `roadmap.md`.
 
@@ -155,6 +155,7 @@ POST /api/v1/tasks/{id}/instructions
 POST /api/v1/tasks/{id}/instructions/execute-stream                 ← streaming
 POST /api/v1/tasks/{id}/instructions/clarify                        ← streaming
 POST /api/v1/tasks/{id}/instructions/generate-prompt               ← streaming
+POST /api/v1/tasks/{id}/instructions/reset-workspace               ← deletes /workspace/repo and reinits git
 POST /api/v1/tasks/{id}/instructions/generate-test-cases           ← streaming
 POST /api/v1/tasks/{id}/instructions/run-unit-tests                ← streaming
 POST /api/v1/tasks/{id}/instructions/generate-integration-test-cases  ← streaming
@@ -272,12 +273,23 @@ The button set below the input area switches based on `selectedStep`:
 
 | selectedStep | Textarea | Buttons |
 |---|---|---|
-| implement (or none selected) | Enabled (instruction input) | Clarify requirements / Skip to generate prompt |
-| implement (unconfirmed prompt present) | Enabled (feedback input) | Confirm & Execute / Regenerate |
+| implement — initial (no prior completed instruction) | Enabled (instruction input) | Send |
+| implement — redo (prior completed instruction exists) | Enabled (instruction input) | Modify / Reset & Rebuild |
+| implement — clarify in progress | Enabled (answer input) | Send Answer / Skip to generate prompt |
+| implement — unconfirmed prompt present | Enabled (feedback input) | Confirm & Execute / Regenerate |
 | unit_test | Disabled | Generate test cases / Approve & run tests / Request revision / Re-run tests / Regenerate test cases |
 | integration_test | Disabled | Generate integration test cases / Approve & run integration tests / Request revision / Re-run integration tests / Regenerate integration test cases |
 | e2e_test | Disabled | Generate E2E test cases / Approve & run E2E tests / Request revision / Re-run E2E tests / Regenerate E2E test cases |
 | review | Disabled | Approve / Send back |
+
+**Modify vs Reset & Rebuild**
+
+When a prior completed instruction exists (i.e. code has already been generated), the implement step shows two buttons instead of one:
+
+- **Modify**: Starts the clarify → prompt generation → execute flow with the existing `/workspace/repo` code intact. Claude sees the current codebase and makes targeted changes.
+- **Reset & Rebuild**: Deletes all files under `/workspace/repo` and reinitialises a bare git repository, then starts the clarify → prompt generation → execute flow from scratch.
+
+The backend provides `POST /api/v1/tasks/{id}/instructions/reset-workspace` to perform the deletion and git reinit. The frontend calls this endpoint before starting the clarify flow when "Reset & Rebuild" is chosen.
 
 ### 5.3 Step Bar
 

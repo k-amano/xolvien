@@ -92,6 +92,32 @@ async def execute_instruction_stream(
     )
 
 
+@router.post("/reset-workspace")
+async def reset_workspace(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """
+    Delete all files under /workspace/repo and reinitialise a bare git repository.
+    Called before "Reset & Rebuild" to start implementation from scratch.
+    """
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not task.container_id:
+        raise HTTPException(status_code=400, detail="Task has no container")
+
+    claude_service = get_claude_service()
+    try:
+        claude_service.reset_workspace(task.container_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"status": "ok"}
+
+
 @router.post("/generate-prompt")
 async def generate_prompt_stream(
     task_id: int,
