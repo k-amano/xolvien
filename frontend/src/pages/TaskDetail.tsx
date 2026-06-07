@@ -506,6 +506,10 @@ export default function TaskDetail() {
     setChatEntries([{ type: 'user_instruction', content: userMsg }])
     setClarifying(true)
 
+    streamKeyRef.current += 1
+    const clarifyKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: clarifyKey, started: false }])
+
     let streamedText = ''
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
@@ -518,6 +522,9 @@ export default function TaskDetail() {
       [],
       (chunk) => {
         streamedText += chunk
+        setLogEntries(prev => prev.map(e =>
+          e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + chunk, started: true } : e
+        ))
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'clarify_streaming'
             ? { ...e, content: streamedText }
@@ -574,6 +581,10 @@ export default function TaskDetail() {
     })
     setClarifying(true)
 
+    streamKeyRef.current += 1
+    const clarifyKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: clarifyKey, started: false }])
+
     let streamedText = ''
     await clarifyStream(
       taskId,
@@ -581,6 +592,9 @@ export default function TaskDetail() {
       newHistory,
       (chunk) => {
         streamedText += chunk
+        setLogEntries(prev => prev.map(e =>
+          e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + chunk, started: true } : e
+        ))
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'clarify_streaming'
             ? { ...e, content: streamedText }
