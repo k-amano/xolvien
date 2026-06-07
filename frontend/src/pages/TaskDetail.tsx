@@ -2507,7 +2507,7 @@ export default function TaskDetail() {
           {/* Left: Log Viewer */}
           <div style={{ display: 'flex', flexDirection: 'column', flex: `0 0 ${logWidthPercent}%`, minWidth: 0, overflow: 'hidden', paddingLeft: '24px' }}>
             {/* Running status banner */}
-            {(streaming || task.status === 'running' || task.status === 'initializing' || task.status === 'testing' || generating || clarifying || generatingTestCases || runningTests) && (
+            {(streaming || task.status === 'running' || task.status === 'initializing' || task.status === 'testing' || generating || generatingTestCases || runningTests) && (
               <div style={{
                 background: '#1e3a5f',
                 borderBottom: '1px solid #2563eb',
