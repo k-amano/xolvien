@@ -97,7 +97,7 @@ function fmtHms(sec: number): string {
 // A log entry can be either a structured TaskLog or a stream chunk
 type LogEntry =
   | { kind: 'log'; data: TaskLog }
-  | { kind: 'stream'; text: string; key: string }
+  | { kind: 'stream'; text: string; key: string; started: boolean }
 
 
 export default function TaskDetail() {
@@ -536,7 +536,7 @@ export default function TaskDetail() {
         } else {
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'clarify_question', content: streamedText }
+              ? { type: 'clarify_question', content: streamedText.split('\n').filter(l => l !== '[Claude] ...').join('\n').trim() }
               : e
           ))
         }
@@ -599,7 +599,7 @@ export default function TaskDetail() {
         } else {
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'clarify_question', content: streamedText }
+              ? { type: 'clarify_question', content: streamedText.split('\n').filter(l => l !== '[Claude] ...').join('\n').trim() }
               : e
           ))
         }
@@ -627,6 +627,10 @@ export default function TaskDetail() {
       return [...prev, { type: 'prompt_generating' }]
     })
 
+    streamKeyRef.current += 1
+    const promptKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: promptKey, started: false }])
+
     // Use the current chatEntries snapshot to find user_instruction
     // We need to read it before state updates; capture via closure
     const currentEntries = chatEntries
@@ -638,11 +642,21 @@ export default function TaskDetail() {
       taskId,
       instructionContent,
       instruction,
-      (chunk) => { promptText += chunk },
+      (chunk) => {
+        promptText += chunk
+        setLogEntries(prev => prev.map(e =>
+          e.kind === 'stream' && e.key === promptKey ? { ...e, text: e.text + chunk, started: true } : e
+        ))
+      },
       () => {
         const cleaned = promptText
           .split('\n')
-          .filter(line => line !== '[Claude] ...')
+          .filter(line =>
+            !line.startsWith('[Thinking]') &&
+            !line.startsWith('[Tool:') &&
+            !line.startsWith('[Result]') &&
+            line !== '[Claude] ...'
+          )
           .join('\n')
           .trim()
         setGenerating(false)
@@ -679,16 +693,30 @@ export default function TaskDetail() {
       return [...prev, { type: 'prompt_generating' }]
     })
 
+    streamKeyRef.current += 1
+    const promptKey = `stream-${streamKeyRef.current}`
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: promptKey, started: false }])
+
     let promptText = ''
     await generatePromptStream(
       taskId,
       originalInstruction?.content ?? '',
       instruction,
-      (chunk) => { promptText += chunk },
+      (chunk) => {
+        promptText += chunk
+        setLogEntries(prev => prev.map(e =>
+          e.kind === 'stream' && e.key === promptKey ? { ...e, text: e.text + chunk, started: true } : e
+        ))
+      },
       () => {
         const cleaned = promptText
           .split('\n')
-          .filter(line => line !== '[Claude] ...')
+          .filter(line =>
+            !line.startsWith('[Thinking]') &&
+            !line.startsWith('[Tool:') &&
+            !line.startsWith('[Result]') &&
+            line !== '[Claude] ...'
+          )
           .join('\n')
           .trim()
         setGenerating(false)
@@ -723,7 +751,7 @@ export default function TaskDetail() {
 
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey, started: false }])
 
     await executeInstructionStream(
       taskId,
@@ -731,7 +759,7 @@ export default function TaskDetail() {
       (chunk) => {
         setLogEntries(prev => prev.map(entry =>
           entry.kind === 'stream' && entry.key === currentKey
-            ? { ...entry, text: entry.text + chunk }
+            ? { ...entry, text: entry.text + chunk, started: true }
             : entry
         ))
       },
@@ -777,7 +805,7 @@ export default function TaskDetail() {
 
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey, started: false }])
 
     await runUnitTestsStream(
       taskId,
@@ -786,7 +814,7 @@ export default function TaskDetail() {
         setLogEntries(prev =>
           prev.map(entry =>
             entry.kind === 'stream' && entry.key === currentKey
-              ? { ...entry, text: entry.text + chunk }
+              ? { ...entry, text: entry.text + chunk, started: true }
               : entry
           )
         )
@@ -897,7 +925,7 @@ export default function TaskDetail() {
 
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey, started: false }])
 
     await runIntegrationTestsStream(
       taskId,
@@ -906,7 +934,7 @@ export default function TaskDetail() {
         setLogEntries(prev =>
           prev.map(entry =>
             entry.kind === 'stream' && entry.key === currentKey
-              ? { ...entry, text: entry.text + chunk }
+              ? { ...entry, text: entry.text + chunk, started: true }
               : entry
           )
         )
@@ -1009,14 +1037,14 @@ export default function TaskDetail() {
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey, started: false }])
     await generateTestCasesStream(
       taskId,
       confirmedPrompt,
       (chunk) => {
         setLogEntries(prev => prev.map(entry =>
           entry.kind === 'stream' && entry.key === tcStreamKey
-            ? { ...entry, text: entry.text + chunk }
+            ? { ...entry, text: entry.text + chunk, started: true }
             : entry
         ))
         for (const line of chunk.split('\n')) {
@@ -1070,14 +1098,14 @@ export default function TaskDetail() {
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey, started: false }])
     await generateIntegrationTestCasesStream(
       taskId,
       confirmedPrompt,
       (chunk) => {
         setLogEntries(prev => prev.map(entry =>
           entry.kind === 'stream' && entry.key === tcStreamKey
-            ? { ...entry, text: entry.text + chunk }
+            ? { ...entry, text: entry.text + chunk, started: true }
             : entry
         ))
         for (const line of chunk.split('\n')) {
@@ -1139,7 +1167,7 @@ export default function TaskDetail() {
 
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey, started: false }])
 
     await runE2ETestsStream(
       taskId,
@@ -1148,7 +1176,7 @@ export default function TaskDetail() {
         setLogEntries(prev =>
           prev.map(entry =>
             entry.kind === 'stream' && entry.key === currentKey
-              ? { ...entry, text: entry.text + chunk }
+              ? { ...entry, text: entry.text + chunk, started: true }
               : entry
           )
         )
@@ -1251,14 +1279,14 @@ export default function TaskDetail() {
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey, started: false }])
     await generateE2ETestCasesStream(
       taskId,
       confirmedPrompt,
       (chunk) => {
         setLogEntries(prev => prev.map(entry =>
           entry.kind === 'stream' && entry.key === tcStreamKey
-            ? { ...entry, text: entry.text + chunk }
+            ? { ...entry, text: entry.text + chunk, started: true }
             : entry
         ))
         for (const line of chunk.split('\n')) {
@@ -1333,7 +1361,7 @@ export default function TaskDetail() {
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: tcStreamKey, started: false }])
     await generateTestCasesStream(
       taskId,
       revisionFeedback.trim()
@@ -1342,7 +1370,7 @@ export default function TaskDetail() {
       (chunk) => {
         setLogEntries(prev => prev.map(entry =>
           entry.kind === 'stream' && entry.key === tcStreamKey
-            ? { ...entry, text: entry.text + chunk }
+            ? { ...entry, text: entry.text + chunk, started: true }
             : entry
         ))
         for (const line of chunk.split('\n')) {
@@ -1397,7 +1425,7 @@ export default function TaskDetail() {
 
     streamKeyRef.current += 1
     const currentKey = `stream-${streamKeyRef.current}`
-    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey }])
+    setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: currentKey, started: false }])
 
     await gitPushStream(
       taskId,
@@ -1405,7 +1433,7 @@ export default function TaskDetail() {
         setLogEntries(prev =>
           prev.map(entry =>
             entry.kind === 'stream' && entry.key === currentKey
-              ? { ...entry, text: entry.text + chunk }
+              ? { ...entry, text: entry.text + chunk, started: true }
               : entry
           )
         )
@@ -1485,8 +1513,6 @@ export default function TaskDetail() {
         )
 
       case 'clarify_streaming': {
-        // Hide PROMPT_READY prefix while streaming — onDone will convert to prompt_generated
-        const displayContent = entry.content.startsWith('PROMPT_READY') ? '' : entry.content
         return (
           <div key={idx} style={{
             background: '#0f172a', border: '1px solid #334155', borderRadius: '6px',
@@ -1494,7 +1520,7 @@ export default function TaskDetail() {
             whiteSpace: 'pre-wrap', lineHeight: 1.6,
           }}>
             <span style={{ fontSize: '0.72rem', color: '#6366f1', marginBottom: '4px', display: 'block', fontWeight: 600 }}>{t.claudeLabel}</span>
-            {displayContent || t.thinking}
+            {t.thinking}
           </div>
         )
       }
@@ -2532,13 +2558,18 @@ export default function TaskDetail() {
                     )
                   } else {
                     const HIDDEN_PREFIXES = ['[XOLVIEN_PROGRESS]', '[XOLVIEN_TC_START]', '[XOLVIEN_TC_DONE]']
-                    const displayText = entry.text
-                      ? entry.text.split('\n').filter(l => !HIDDEN_PREFIXES.some(p => l.startsWith(p))).join('\n')
-                      : ''
+                    const lines = entry.text
+                      ? entry.text.split('\n').filter(l => !HIDDEN_PREFIXES.some(p => l.startsWith(p)))
+                      : []
                     return (
-                      <p key={entry.key} className="log-stream-chunk">
-                        {displayText || t.cliStarting}
-                      </p>
+                      <div key={entry.key}>
+                        <p className="log-stream-chunk" style={{ color: '#6b7280', fontStyle: 'italic', margin: '1px 0' }}>{t.cliStarting}</p>
+                        {lines.map((line, lineIdx) => (
+                          line.trim()
+                            ? <p key={lineIdx} className="log-stream-chunk" style={{ margin: '1px 0' }}>{line}</p>
+                            : null
+                        ))}
+                      </div>
                     )
                   }
                 })

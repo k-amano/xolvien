@@ -635,7 +635,7 @@ README:
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", meta_prompt)
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT)
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_EXECUTE)
 
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
