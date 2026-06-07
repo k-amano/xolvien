@@ -2520,32 +2520,6 @@ export default function TaskDetail() {
         <div className="task-detail-body" ref={bodyRef}>
           {/* Left: Log Viewer */}
           <div style={{ display: 'flex', flexDirection: 'column', flex: `0 0 ${logWidthPercent}%`, minWidth: 0, overflow: 'hidden', paddingLeft: '24px' }}>
-            {/* Running status banner */}
-            {(streaming || task.status === 'running' || task.status === 'initializing' || task.status === 'testing' || generating || generatingTestCases || runningTests) && (
-              <div style={{
-                background: '#1e3a5f',
-                borderBottom: '1px solid #2563eb',
-                padding: '6px 16px',
-                fontSize: '0.82rem',
-                color: '#93c5fd',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                flexShrink: 0,
-              }}>
-                {clarifying
-                  ? t.bannerClarifying
-                  : generating
-                  ? t.bannerGenerating
-                  : generatingTestCases
-                  ? (tcGenLabel ?? t.bannerGeneratingTC)
-                  : runningTests || task.status === 'testing'
-                  ? `${runningTestType === 'unit' ? t.bannerUnitTest : runningTestType === 'integration' ? t.bannerIntegrationTest : runningTestType === 'e2e' ? t.bannerE2ETest : t.bannerTest}: ${testPhaseLabel ?? t.bannerTestGeneratingCode}`
-                  : task.status === 'initializing'
-                  ? t.bannerInitializing
-                  : t.bannerExecuting}
-              </div>
-            )}
             <div className="log-viewer" ref={logViewerRef} style={{ flex: 1 }}>
               {logEntries.length === 0 ? (
                 <p className="log-empty">{t.noLogs}</p>
