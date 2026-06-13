@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-06-07 (session 2)
+**Last updated**: 2026-06-13 (session 3)
 
 See `spec.md` for currently implemented features.
 
@@ -19,18 +19,57 @@ See `spec.md` for currently implemented features.
 - `[Thinking]`, `[Tool:]`, `[Result]`, `[Claude] ...` lines filtered from the right pane prompt display; only the final prompt text is shown there.
 - WebSocket logs with `source == 'claude'` or `source == 'git'` are filtered out on the frontend to avoid duplication with the stream.
 
-**Known issue (separate backlog item H4):** During `execute_instruction`, permission errors and git failures can loop without stopping. Root cause: xolvien user permissions in the container. Must be stopped manually.
+**Known issue (H4):** Fixed — see below.
 
 ---
 
-### H4: Permission errors loop indefinitely during execution
+### ~~H4: Permission errors loop indefinitely during execution~~ ✅ Fixed (2026-06-13)
 
 During `execute_instruction`, Claude runs as root inside the container and hits permission errors on `/workspace/repo` (owned by the `xolvien` user). The error and git failure repeat in a loop with no automatic stop — the user must press Stop manually.
 
+**Root cause:** `reset_workspace()` ran as root and left `/workspace/repo` owned by root, so the `xolvien` privilege drop inside `_RUNNER_SCRIPT_EXECUTE` could not write files.
+
+**Fix:**
+- `reset_workspace()` now calls `chown xolvien:xolvien /workspace/repo` before `git init` and `chown -R xolvien:xolvien /workspace/repo` after, so the freshly-reset repo is always owned by the correct user.
+- `_RUNNER_SCRIPT_EXECUTE` now tracks consecutive identical tool results. After 5 consecutive identical `[Result]` lines, it kills the Claude process and emits `[ERROR] Identical error repeated 5 times — aborting to prevent infinite loop.`
+
+---
+
+### ~~H5: Clarify answers require full re-typing of question and answer~~ ✅ Fixed (2026-06-13)
+
+When Claude asks a clarifying question with numbered options (e.g. `1. React  2. Vue`), the user must type the full answer. Single-option shortcuts (typing `1` or `2`) are not recognized.
+
 **Requirements:**
-- Identify why `_RUNNER_SCRIPT_EXECUTE` runs as root instead of dropping to the `xolvien` user.
-- Fix privilege drop so Claude writes files as `xolvien`.
-- Add a loop-detection safeguard: abort after N consecutive identical errors.
+- Detect when Claude's question contains a numbered list of options.
+- Allow the user to reply with just the option number (e.g. `1`).
+- Expand the shortcut to the full option text before sending to the backend, or handle it server-side.
+
+---
+
+### ~~Task resume after stop or error~~ ✅ Fixed (2026-06-13)
+
+After a Stop or execution error, tasks were left in `stopped`/`failed` status, making all action buttons unavailable with no way to continue.
+
+**Root cause:** `stopped` and `failed` were DB-persisted statuses. Once set, the frontend blocked all operations with `task?.status !== 'idle'`.
+
+**Fix:**
+- Removed `TaskStatus.FAILED` and `TaskStatus.STOPPED` from the enum entirely — these are transient runtime states, not persistent task states.
+- DB migration removes `FAILED`/`STOPPED` from the PostgreSQL `taskstatus` enum and migrates any existing rows to `IDLE`.
+- `execute_instruction` exceptions and `POST /stop` now both return the task to `IDLE`.
+- `execute_instruction` status guard changed to only block `PENDING`/`INITIALIZING` (not `STOPPED`/`FAILED`).
+- `ensure_container_running` already auto-restarts a stopped container on the next operation.
+
+---
+
+### ~~Reset & Rebuild flow broken~~ ✅ Fixed (2026-06-13)
+
+`Reset & Rebuild` button was disabled when textarea was empty, and clicking it did not restart the clarify flow correctly.
+
+**Fix:**
+- Button `disabled` condition no longer requires textarea input.
+- `handleResetAndRebuild` now fully resets frontend state to new-task initial values (`selectedStep`, `steps`, `confirmedPrompt`, `chatEntries`) before re-entering the clarify flow — identical to a new task.
+- `handleStartClarify` accepts an optional `overrideMsg` so Reset & Rebuild can pass the previous instruction without requiring textarea input.
+- `isClarifyMode` no longer requires `selectedStep === 'implement'`; it triggers whenever the last chat entry is `clarify_question`.
 
 ---
 

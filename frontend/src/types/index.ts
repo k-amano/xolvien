@@ -5,8 +5,6 @@ export type TaskStatus =
   | 'running'
   | 'testing'
   | 'completed'
-  | 'failed'
-  | 'stopped'
 
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error' | 'critical'
 export type LogSource = 'system' | 'docker' | 'claude' | 'git' | 'test'

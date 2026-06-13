@@ -41,7 +41,6 @@ function getStatusClass(status: TaskStatus): string {
   switch (status) {
     case 'pending':
     case 'initializing':
-    case 'stopped':
       return 'status-badge status-pending'
     case 'idle':
       return 'status-badge status-idle'
@@ -50,8 +49,6 @@ function getStatusClass(status: TaskStatus): string {
       return 'status-badge status-running'
     case 'completed':
       return 'status-badge status-completed'
-    case 'failed':
-      return 'status-badge status-failed'
     default:
       return 'status-badge status-pending'
   }
@@ -114,8 +111,6 @@ export default function TaskDetail() {
       case 'running': return t.statusRunning
       case 'testing': return t.statusTesting
       case 'completed': return t.statusCompleted
-      case 'failed': return t.statusFailed
-      case 'stopped': return t.statusStopped
       default: return status
     }
   }
@@ -131,10 +126,6 @@ export default function TaskDetail() {
         return t.msgTesting
       case 'completed':
         return t.msgCompleted
-      case 'failed':
-        return t.msgFailed
-      case 'stopped':
-        return t.msgStopped
       default:
         return null
     }
@@ -488,19 +479,31 @@ export default function TaskDetail() {
   // ─── Handler functions ────────────────────────────────────────────────────
 
   async function handleResetAndRebuild() {
-    if (!instruction.trim() || clarifying || generating) return
+    if (clarifying || generating) return
+    const msgToUse = confirmedPrompt || instruction.trim()
     try {
       await resetWorkspace(taskId)
     } catch (err) {
       setChatEntries(prev => [...prev, { type: 'error', message: `Reset failed: ${err instanceof Error ? err.message : String(err)}` }])
       return
     }
-    await handleStartClarify()
+    // Restore to the same initial state as a new task
+    setSelectedStep(null)
+    setSteps([
+      { id: 'implement',        label: '',  status: 'pending' },
+      { id: 'unit_test',        label: '',  status: 'pending' },
+      { id: 'integration_test', label: '',  status: 'pending' },
+      { id: 'e2e_test',         label: '',  status: 'pending' },
+      { id: 'review',           label: '',  status: 'pending' },
+    ])
+    setConfirmedPrompt('')
+    setChatEntries([])
+    setInstruction(msgToUse)
   }
 
-  async function handleStartClarify() {
-    if (!instruction.trim() || clarifying || generating) return
-    const userMsg = instruction.trim()
+  async function handleStartClarify(overrideMsg?: string) {
+    const userMsg = overrideMsg ?? instruction.trim()
+    if (!userMsg || clarifying || generating) return
     setInstruction('')
 
     setChatEntries([{ type: 'user_instruction', content: userMsg }])
@@ -2176,8 +2179,7 @@ export default function TaskDetail() {
     const isInitialPhase = chatEntries.length === 0 ||
       chatEntries.every(e => e.type === 'user_instruction') ||
       selectedStep === 'implement'
-    const isClarifyMode = selectedStep === 'implement' &&
-      (lastEntry?.type === 'clarify_question')
+    const isClarifyMode = lastEntry?.type === 'clarify_question'
     const lastUnconfirmedPrompt = chatEntries.reduce<(ChatEntry & { type: 'prompt_generated' }) | null>(
       (last, e) => e.type === 'prompt_generated' && !e.confirmed ? e as ChatEntry & { type: 'prompt_generated' } : last, null)
     const isPromptPhase = !!lastUnconfirmedPrompt &&
@@ -2225,15 +2227,15 @@ export default function TaskDetail() {
     } else if (isInitialPhase) {
       buttons = confirmedPrompt ? (
         <>
-          <button className="btn-primary" onClick={handleStartClarify} disabled={!canSend}>
+          <button className="btn-primary" onClick={() => handleStartClarify()} disabled={!canSend}>
             {t.modify}
           </button>
-          <button className="btn-danger" onClick={handleResetAndRebuild} disabled={!canSend}>
+          <button className="btn-danger" onClick={handleResetAndRebuild} disabled={isBusy || task?.status !== 'idle'}>
             {t.resetAndRebuild}
           </button>
         </>
       ) : (
-        <button className="btn-primary" onClick={handleStartClarify} disabled={!canSend}>
+        <button className="btn-primary" onClick={() => handleStartClarify()} disabled={!canSend}>
           {t.sendInstruction}
         </button>
       )

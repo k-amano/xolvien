@@ -176,8 +176,16 @@ _tool_input = {}
 _in_thinking = {}
 _thinking_buf = {}
 
+# Loop-detection: abort after 5 consecutive identical result lines (permission errors etc.)
+_last_result = None
+_repeat_count = 0
+_MAX_REPEATS = 5
+
 buf = b''
+_aborted = False
 for chunk in iter(lambda: proc.stdout.read(256), b''):
+    if _aborted:
+        break
     buf += chunk
     while b'\\n' in buf:
         raw_line, buf = buf.split(b'\\n', 1)
@@ -249,17 +257,31 @@ for chunk in iter(lambda: proc.stdout.read(256), b''):
             for item in msg.get('content', []):
                 if item.get('type') == 'tool_result':
                     content = item.get('content', '')
+                    result_text = ''
                     if isinstance(content, str) and content.strip():
-                        preview = content.strip()[:300]
-                        emit('[Result] ' + preview)
+                        result_text = content.strip()[:300]
+                        emit('[Result] ' + result_text)
                     elif isinstance(content, list):
                         for c in content:
                             if c.get('type') == 'text' and c.get('text', '').strip():
-                                emit('[Result] ' + c['text'].strip()[:300])
+                                result_text = c['text'].strip()[:300]
+                                emit('[Result] ' + result_text)
                                 break
+                    # Loop-detection on tool results
+                    if result_text:
+                        if result_text == _last_result:
+                            _repeat_count += 1
+                        else:
+                            _last_result = result_text
+                            _repeat_count = 1
+                        if _repeat_count >= _MAX_REPEATS:
+                            emit(f'[ERROR] Identical error repeated {_MAX_REPEATS} times — aborting to prevent infinite loop.')
+                            proc.kill()
+                            _aborted = True
+                            break
 
 proc.wait()
-sys.exit(proc.returncode)
+sys.exit(1 if _aborted else proc.returncode)
 """
 
 # Python script for batch test case generation using --output-format json + --resume
@@ -363,8 +385,10 @@ class ClaudeCodeService:
         cmd = (
             "rm -rf /workspace/repo && "
             "mkdir -p /workspace/repo && "
+            "chown xolvien:xolvien /workspace/repo && "
             "git init /workspace/repo && "
-            "git -C /workspace/repo commit --allow-empty -m 'initial'"
+            "git -C /workspace/repo commit --allow-empty -m 'initial' && "
+            "chown -R xolvien:xolvien /workspace/repo"
         )
         exit_code, _, stderr = self.docker_service.execute_command(container_id, cmd, "/workspace")
         if exit_code != 0:
@@ -662,7 +686,7 @@ README:
             raise ValueError("Task not found")
         if not task.container_id:
             raise ValueError("Task has no container")
-        if task.status not in [TaskStatus.IDLE, TaskStatus.RUNNING]:
+        if task.status in [TaskStatus.INITIALIZING, TaskStatus.PENDING]:
             raise ValueError(f"Task is not ready (status: {task.status})")
 
         # Create instruction record
@@ -762,7 +786,7 @@ README:
             instruction.completed_at = datetime.utcnow()
             instruction.error_message = error_msg
             instruction.exit_code = 1
-            task.status = TaskStatus.FAILED
+            task.status = TaskStatus.IDLE
             await db.commit()
 
             log = TaskLog(

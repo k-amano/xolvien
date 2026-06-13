@@ -8,7 +8,6 @@ function getStatusClass(status: TaskStatus): string {
   switch (status) {
     case 'pending':
     case 'initializing':
-    case 'stopped':
       return 'status-badge status-pending'
     case 'idle':
       return 'status-badge status-idle'
@@ -17,8 +16,6 @@ function getStatusClass(status: TaskStatus): string {
       return 'status-badge status-running'
     case 'completed':
       return 'status-badge status-completed'
-    case 'failed':
-      return 'status-badge status-failed'
     default:
       return 'status-badge status-pending'
   }
@@ -46,10 +43,6 @@ export default function Dashboard() {
         return t.statusTesting
       case 'completed':
         return t.statusCompleted
-      case 'failed':
-        return t.statusFailed
-      case 'stopped':
-        return t.statusStopped
       default:
         return status
     }

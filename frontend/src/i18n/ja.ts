@@ -60,16 +60,12 @@ export const ja = {
   statusRunning: 'running',
   statusTesting: 'testing',
   statusCompleted: 'completed',
-  statusFailed: 'failed',
-  statusStopped: 'stopped',
 
   // TaskDetail - status messages
   msgPreparing: 'タスクの準備中...',
   msgRunning: '実行中です。完了をお待ちください...',
   msgTesting: 'テスト中です...',
   msgCompleted: 'タスクは完了しました。',
-  msgFailed: 'タスクが失敗しました。',
-  msgStopped: 'タスクは停止されました。',
 
   // TaskDetail - header/topbar
   gitPush: 'Git Push',

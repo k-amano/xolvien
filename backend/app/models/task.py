@@ -15,8 +15,6 @@ class TaskStatus(str, enum.Enum):
     RUNNING = "running"  # Claude Code executing
     TESTING = "testing"  # Running tests
     COMPLETED = "completed"  # Completed
-    FAILED = "failed"  # Failed
-    STOPPED = "stopped"  # Manually stopped
 
 
 class Task(Base):

@@ -86,7 +86,7 @@ async def initialize_task_container(
             # Update status to failed
             result = await db.execute(select(Task).where(Task.id == task_id))
             task = result.scalar_one()
-            task.status = TaskStatus.FAILED
+            task.status = TaskStatus.IDLE
             await db.commit()
 
             await log_task_event(
@@ -229,9 +229,8 @@ async def stop_task(
     docker_service = get_docker_service()
     docker_service.stop_container(task.container_id)
 
-    # Update status
-    task.status = TaskStatus.STOPPED
-    task.completed_at = datetime.utcnow()
+    # Container is stopped but can be restarted — keep status as idle
+    task.status = TaskStatus.IDLE
     await db.commit()
     await db.refresh(task)
 

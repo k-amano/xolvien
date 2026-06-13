@@ -56,15 +56,11 @@ export const en = {
   statusRunning: 'running',
   statusTesting: 'testing',
   statusCompleted: 'completed',
-  statusFailed: 'failed',
-  statusStopped: 'stopped',
 
   msgPreparing: 'Preparing task...',
   msgRunning: 'Running. Please wait...',
   msgTesting: 'Testing...',
   msgCompleted: 'Task completed.',
-  msgFailed: 'Task failed.',
-  msgStopped: 'Task stopped.',
 
   gitPush: 'Git Push',
   pushing: 'Pushing...',
