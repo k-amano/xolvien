@@ -20,7 +20,7 @@ All of the following are required to use Xolvien.
 |---|---|
 | **Docker** | Used to create an isolated container environment for each task |
 | **Python 3.11+** | Required to run the backend |
-| **Node.js 18+** | Required to run the frontend |
+| **Node.js 20+** | Required to run the frontend |
 | **Claude Code CLI (authenticated)** | Used to call the AI (Claude) |
 | **Claude Max Plan** | Subscription required to use the AI through the Claude Code CLI |
 | **GitHub account + SSH key** | Used to access the repository where code is stored |
@@ -976,7 +976,7 @@ Then follow Steps 9–14 as before.
 
 The task list is shown on the dashboard (home screen). Click a task to open the task detail screen and continue giving instructions.
 
-Note: **Restarting Xolvien also restarts containers.** If a past task's container is stopped after restarting, delete the task and recreate it.
+Note: **Restarting Xolvien also stops containers.** On the next operation (sending an instruction, running tests, etc.), the container is automatically restarted — no need to delete and recreate the task.
 
 ---
 
@@ -1064,7 +1064,7 @@ Done when you see:
 
 # Troubleshooting
 
-## Status shows "failed"
+## Task creation fails or stays "initializing"
 
 Check the log area for error details.
 
@@ -1104,7 +1104,6 @@ The "Send" button is only active when the status is **"idle"** and there's text 
 | `pending` | Waiting | Wait |
 | `initializing` | Preparing | Wait |
 | `running` | Executing | Wait for completion |
-| `failed` | Failed | See troubleshooting above |
 
 After clicking "Send", the button changes to "Send Answer" / "Next" — this means the requirement clarification phase has started. Wait for Claude's questions to appear.
 

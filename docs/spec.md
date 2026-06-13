@@ -1,6 +1,6 @@
 # Xolvien — Current Specification
 
-**Last updated**: 2026-06-07 (implement redo/reset flow, real-time log display via stream-json)
+**Last updated**: 2026-06-13 (remove FAILED/STOPPED statuses, fix Reset & Rebuild flow, H4 permission fix)
 
 This document records the specification as currently implemented. Unimplemented future features are described in `roadmap.md`.
 
@@ -48,9 +48,9 @@ User ──< Repository ──< Task ──< Instruction
 
 ```
 PENDING → INITIALIZING → IDLE → RUNNING → TESTING → COMPLETED
-                                                   → FAILED
-                                                   → STOPPED
 ```
+
+Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, the task returns to `IDLE` so work can continue without recreating the task.
 
 ### 2.3 Key Table Definitions
 
@@ -62,7 +62,7 @@ PENDING → INITIALIZING → IDLE → RUNNING → TESTING → COMPLETED
 | repository_id | INTEGER FK | |
 | title | VARCHAR | Task title |
 | branch_name | VARCHAR | Working branch name |
-| status | ENUM | PENDING / INITIALIZING / IDLE / RUNNING / TESTING / COMPLETED / FAILED / STOPPED |
+| status | ENUM | PENDING / INITIALIZING / IDLE / RUNNING / TESTING / COMPLETED |
 | container_id | VARCHAR | Docker container ID |
 | container_name | VARCHAR | Docker container name |
 | workspace_path | VARCHAR | Workspace path inside the container (`/workspace`) |
@@ -411,9 +411,9 @@ backend/app/
 
 `_RUNNER_SCRIPT` and `_RUNNER_SCRIPT_AGENT` both spawn a daemon thread that writes `[Claude] ...\n` to stdout every 3 seconds while Claude is running. This ensures the `execute_command_stream` chunk timeout (120 s) is never hit during normal inter-tool pauses. The 3-second interval is the maximum acceptable silence from a UX standpoint. The thread is a daemon so it terminates automatically when Claude exits.
 
-**Task status is set to FAILED on execution error**
+**Errors are logged, not persisted as task status**
 
-When `execute_instruction()` raises an error (e.g. stream timeout), the task status is set to `FAILED` rather than `IDLE`. This keeps the Git Push button disabled until the issue is resolved, preventing users from pushing incomplete or broken code.
+When `execute_instruction()` raises an error (e.g. stream timeout or permission error), the task status is reset to `IDLE` and the error message is appended to `task_logs` with `source=SYSTEM`. The user can send a new instruction, click "Reset & Rebuild", or otherwise continue without recreating the task. `FAILED` and `STOPPED` statuses were removed because they blocked all UI operations without providing a recovery path.
 
 **Why prompt generation also runs in agent mode**
 
