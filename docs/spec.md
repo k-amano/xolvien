@@ -249,7 +249,7 @@ Replaced `PromptState`-based screen switching with an append-only chat history v
 ```
 ChatEntry =
   | user_instruction               ← user's instruction
-  | clarify_question               ← Claude's question
+  | clarify_question               ← Claude's question (parsed into question text + option buttons)
   | clarify_answer                 ← user's answer
   | clarify_streaming              ← streaming in progress
   | prompt_generating              ← prompt being generated
@@ -275,7 +275,7 @@ The button set below the input area switches based on `selectedStep`:
 |---|---|---|
 | implement — initial (no prior completed instruction) | Enabled (instruction input) | Send |
 | implement — redo (prior completed instruction exists) | Enabled (instruction input) | Modify / Reset & Rebuild |
-| implement — clarify in progress | Enabled (answer input) | Send Answer / Skip to generate prompt |
+| implement — clarify in progress | Enabled (free-text answer input) | Send Answer / Skip to generate prompt (option buttons also shown in the question card) |
 | implement — unconfirmed prompt present | Enabled (feedback input) | Confirm & Execute / Regenerate |
 | unit_test | Disabled | Generate test cases / Approve & run tests / Request revision / Re-run tests / Regenerate test cases |
 | integration_test | Disabled | Generate integration test cases / Approve & run integration tests / Request revision / Re-run integration tests / Regenerate integration test cases |
@@ -353,7 +353,7 @@ backend/app/
 | Method | Description |
 |---|---|
 | `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. |
-| `clarify_requirements()` | Requirement clarification Q&A. Asks questions until enough information is gathered. |
+| `clarify_requirements()` | Requirement clarification Q&A. Asks **one question at a time**, each with a bulleted `Options:` / `選択肢:` block. The frontend parses this into a question text + clickable option buttons; the user can also type a free-text answer. Continues until the user clicks "Skip to generate prompt". |
 | `generate_prompt()` | Converts a brief instruction into an optimized prompt. |
 | `generate_test_cases()` | Generates unit (`TC-NNN` / `test_tc001_`), integration (`ITC-NNN` / `test_itc001_`), or E2E (`E2E-NNN` / `test_e2e001_`) test cases based on the `test_type` argument. Deletes only existing TCs of the same `test_type` before saving. Uses batch generation via `--output-format json` + `--resume <session_id>` (10 cases per Claude call) to support large test suites. Yields `[XOLVIEN_PROGRESS] done/total elapsed_ms=N eta_ms=0` after each batch for real-time progress display. |
 | `run_unit_tests()` | Wrapper passing `TestType.UNIT` to `_run_tests()`. |

@@ -462,17 +462,29 @@ README:
 
 This is the requirements clarification phase. Continue asking questions until the user clicks "Proceed".
 
-Output 1–3 specific questions as a numbered list.
-Always ask the following first:
-1. What programming language and framework should be used? (Ask this even if the file list suggests a language — confirm explicitly with the user)
+**CRITICAL RULE: Ask exactly ONE question per response. Never ask multiple questions at once.**
 
-Then clarify as needed:
+Each response must follow this exact format:
+```
+[Question text]
+
+Options:
+- [Option A]
+- [Option B]
+- [Option C]
+```
+
+Always start with this question first (unless the conversation history shows it was already answered):
+- Question: What programming language and framework should be used?
+- Options must include concrete choices (e.g. "Vanilla HTML/CSS/JS", "React", "Vue", "TypeScript")
+
+After language/framework is confirmed, ask ONE follow-up question at a time about:
 - Features, constraints, and expected behavior
 - If there is a UI, design and interaction flow
 - Specifications the user should decide (not implementation details)
 
-Never output "PROMPT_READY". Always respond with questions only.
-No preamble or explanation — output the question list only.
+Never output "PROMPT_READY". Always respond with one question + options only.
+No preamble or explanation. No numbered prefix on the question itself.
 """
         else:
             clarify_prompt = f"""あなたは要件ヒアリング担当です。ユーザーの指示を受け取り、最適なコードを生成するために必要な不明点を質問します。
@@ -500,17 +512,29 @@ README:
 
 これは要件ヒアリングフェーズです。ユーザーが「次へ進む」を押すまで質問を続けてください。
 
-番号付きリストで1〜3個の具体的な質問を出力してください。
-最初に必ず以下を聞いてください：
-1. 使用するプログラミング言語とフレームワークは何ですか？（ファイル一覧から推測できる場合でもユーザーに明示的に確認すること）
+**重要ルール：1回の応答で必ず1問だけ質問してください。複数の質問を同時に出さないこと。**
 
-その後、必要に応じて以下を確認してください：
+各応答は以下のフォーマットに厳密に従ってください：
+```
+[質問文]
+
+選択肢:
+- [選択肢A]
+- [選択肢B]
+- [選択肢C]
+```
+
+会話履歴に回答済みでない限り、最初に必ずこの質問から始めてください：
+- 質問：使用するプログラミング言語とフレームワークは何ですか？
+- 選択肢には具体的な候補（例：「Vanilla HTML/CSS/JS」「React」「Vue」「TypeScript」）を含めること
+
+言語/フレームワークが確定したら、次の項目について1問ずつ質問してください：
 - 機能・制約・期待する動作
 - UIがある場合はデザインや操作フロー
 - ユーザーが決めるべき仕様（実装詳細ではなく）
 
-「PROMPT_READY」は絶対に出力しないでください。必ず質問で応答してください。
-説明や前置きは不要です。質問リストだけを出力してください。
+「PROMPT_READY」は絶対に出力しないでください。必ず質問1問＋選択肢のみで応答してください。
+説明や前置きは不要です。質問自体に番号をつけないこと。
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", clarify_prompt)

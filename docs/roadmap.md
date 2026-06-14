@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-06-13 (session 3)
+**Last updated**: 2026-06-14 (session 4)
 
 See `spec.md` for currently implemented features.
 
@@ -35,14 +35,15 @@ During `execute_instruction`, Claude runs as root inside the container and hits 
 
 ---
 
-### ~~H5: Clarify answers require full re-typing of question and answer~~ ✅ Fixed (2026-06-13)
+### ~~H5: Clarify answers require full re-typing of question and answer~~ ✅ Fixed (2026-06-14)
 
-When Claude asks a clarifying question with numbered options (e.g. `1. React  2. Vue`), the user must type the full answer. Single-option shortcuts (typing `1` or `2`) are not recognized.
+When Claude asks a clarifying question with numbered options (e.g. `1. React  2. Vue`), the user must type the full answer. Single-option shortcuts (typing `1` or `2`) are not recognized. The core issue was that Claude asked multiple questions at once, making even numbered shortcuts insufficient.
 
-**Requirements:**
-- Detect when Claude's question contains a numbered list of options.
-- Allow the user to reply with just the option number (e.g. `1`).
-- Expand the shortcut to the full option text before sending to the backend, or handle it server-side.
+**Fix:**
+- **Backend** (`claude_service.py`): Updated both EN and JA clarify prompts to ask exactly **one question per response**, each with a bulleted `Options:` / `選択肢:` block.
+- **Frontend** (`TaskDetail.tsx`): Added `parseClarifyQuestion()` — splits the Clauderesponse into question text and option list on the `Options:` / `選択肢:` header.
+- Refactored `handleSendClarifyAnswer` to delegate to `submitClarifyAnswer(userMsg)` so both textarea input and button clicks share the same send logic.
+- The latest `clarify_question` card renders each option as a clickable button; clicking sends that option text immediately without typing. Past question cards show options as plain text only.
 
 ---
 
@@ -70,17 +71,6 @@ After a Stop or execution error, tasks were left in `stopped`/`failed` status, m
 - `handleResetAndRebuild` now fully resets frontend state to new-task initial values (`selectedStep`, `steps`, `confirmedPrompt`, `chatEntries`) before re-entering the clarify flow — identical to a new task.
 - `handleStartClarify` accepts an optional `overrideMsg` so Reset & Rebuild can pass the previous instruction without requiring textarea input.
 - `isClarifyMode` no longer requires `selectedStep === 'implement'`; it triggers whenever the last chat entry is `clarify_question`.
-
----
-
-### H5: Clarify answers require full re-typing of question and answer
-
-When Claude asks a clarifying question with numbered options (e.g. `1. React  2. Vue`), the user must type the full answer. Single-option shortcuts (typing `1` or `2`) are not recognized.
-
-**Requirements:**
-- Detect when Claude's question contains a numbered list of options.
-- Allow the user to reply with just the option number (e.g. `1`).
-- Expand the shortcut to the full option text before sending to the backend, or handle it server-side.
 
 ---
 
@@ -191,6 +181,11 @@ Results from an external agent code review.
 - **User feedback**: "Without output staying visible, it's impossible to debug when something goes wrong. Persistent scroll-based display is mandatory." (bumped to high priority)
 - **Implementation**: Append-only chat history via `ChatEntry` union type. All phases (Q&A / prompt generation / implementation / test cases / test results / review / error / system notices) persist as cards. Input area is always pinned to the bottom; Enter switches to send mode during clarify.
 - **Additional fix (2026-04-26)**: Moved action buttons from inside chat cards to the footer below the input area. `renderActionButtons()` dynamically switches the button set based on `selectedStep`. Textarea is shown as disabled during unit-test and review steps. Removed auto-population of the input field on "Implement" step click. System notices shown as `info` entries appended to chat history.
+
+### ~~Right-pane UI: nested scroll removal and taller input area~~ ✅ Fixed (2026-06-14)
+
+- Removed inner scroll boxes from all chat cards that had `maxHeight` + `overflowY: auto` (prompt text, unit/integration/E2E test case tables, test result table, review prompt block) — the right pane's own scroll covers all content.
+- Raised message input area height: `minHeight 120 → 200 px`, `maxHeight 300 → 400 px` (applies to both the textarea and the Markdown preview div).
 
 ---
 

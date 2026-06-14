@@ -91,6 +91,28 @@ function fmtHms(sec: number): string {
     : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+// Parse a clarify question into question text and option list.
+// Expected format (English or Japanese):
+//   [question text]
+//   \n
+//   Options: / 選択肢:
+//   - option A
+//   - option B
+function parseClarifyQuestion(text: string): { question: string; options: string[] } {
+  const optionHeaderRe = /^(?:options|選択肢)\s*:/im
+  const match = optionHeaderRe.exec(text)
+  if (!match) return { question: text.trim(), options: [] }
+
+  const question = text.slice(0, match.index).trim()
+  const optionsBlock = text.slice(match.index + match[0].length)
+  const options: string[] = []
+  for (const line of optionsBlock.split('\n')) {
+    const m = line.match(/^\s*[-*]\s+(.+)$/)
+    if (m) options.push(m[1].trim())
+  }
+  return { question, options }
+}
+
 // A log entry can be either a structured TaskLog or a stream chunk
 type LogEntry =
   | { kind: 'log'; data: TaskLog }
@@ -563,10 +585,8 @@ export default function TaskDetail() {
     )
   }
 
-  async function handleSendClarifyAnswer() {
-    if (!instruction.trim() || clarifying) return
-    const userMsg = instruction.trim()
-    setInstruction('')
+  async function submitClarifyAnswer(userMsg: string) {
+    if (!userMsg || clarifying) return
 
     // Build history from chatEntries
     const history = chatEntries
@@ -631,6 +651,13 @@ export default function TaskDetail() {
       },
       lang
     )
+  }
+
+  async function handleSendClarifyAnswer() {
+    if (!instruction.trim() || clarifying) return
+    const userMsg = instruction.trim()
+    setInstruction('')
+    await submitClarifyAnswer(userMsg)
   }
 
   async function handleSkipClarify() {
@@ -1505,17 +1532,37 @@ export default function TaskDetail() {
           </div>
         )
 
-      case 'clarify_question':
+      case 'clarify_question': {
+        const { question, options } = parseClarifyQuestion(entry.content)
+        const isLatest = idx === chatEntries.length - 1
         return (
           <div key={idx} style={{
             background: '#0f172a', border: '1px solid #334155', borderRadius: '6px',
             padding: '8px 12px', fontSize: '0.82rem', color: '#e2e8f0',
-            whiteSpace: 'pre-wrap', lineHeight: 1.6,
+            lineHeight: 1.6,
           }}>
             <span style={{ fontSize: '0.72rem', color: '#6366f1', marginBottom: '4px', display: 'block', fontWeight: 600 }}>{t.claudeLabel}</span>
-            {entry.content}
+            <span style={{ whiteSpace: 'pre-wrap' }}>{question}</span>
+            {options.length > 0 && isLatest && !clarifying && (
+              <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {options.map((opt, oi) => (
+                  <button
+                    key={oi}
+                    onClick={() => { setInstruction(''); submitClarifyAnswer(opt) }}
+                    style={{
+                      background: '#1e293b', border: '1px solid #4f46e5', borderRadius: '4px',
+                      color: '#a5b4fc', padding: '6px 12px', fontSize: '0.80rem',
+                      cursor: 'pointer', textAlign: 'left',
+                    }}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )
+      }
 
       case 'clarify_answer':
         return (
@@ -1566,7 +1613,6 @@ export default function TaskDetail() {
             </div>
             <div style={{
               fontFamily: 'monospace', color: '#e2e8f0', whiteSpace: 'pre-wrap', lineHeight: 1.5,
-              maxHeight: '200px', overflowY: 'auto',
             }}>
               {entry.content}
             </div>
@@ -1627,7 +1673,7 @@ export default function TaskDetail() {
                 )}
               </div>
             ) : (
-              <div style={{ overflowX: 'auto', maxHeight: '200px', overflowY: 'auto' }}>
+              <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
@@ -1684,7 +1730,7 @@ export default function TaskDetail() {
                 )}
               </div>
             ) : (
-              <div style={{ overflowX: 'auto', maxHeight: '200px', overflowY: 'auto' }}>
+              <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
@@ -1741,7 +1787,7 @@ export default function TaskDetail() {
                 )}
               </div>
             ) : (
-              <div style={{ overflowX: 'auto', maxHeight: '200px', overflowY: 'auto' }}>
+              <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.75rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid #334155', background: '#0a0f1e' }}>
@@ -1792,7 +1838,7 @@ export default function TaskDetail() {
               {entry.passed ? '✅' : '❌'} {entry.summary || (entry.passed ? t.testPassed : t.testFailed)}
             </div>
             {entry.items.length > 0 && (
-              <div style={{ overflowX: 'auto', maxHeight: '200px', overflowY: 'auto' }}>
+              <div style={{ overflowX: 'auto' }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.72rem' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
@@ -1839,7 +1885,6 @@ export default function TaskDetail() {
             <div style={{
               background: '#1e293b', borderRadius: '4px', padding: '8px',
               fontSize: '0.78rem', color: '#94a3b8', whiteSpace: 'pre-wrap',
-              maxHeight: '100px', overflowY: 'auto',
             }}>
               <span style={{ color: '#475569', fontSize: '0.7rem', display: 'block', marginBottom: '4px' }}>{t.executedPrompt}</span>
               {entry.prompt}
@@ -2367,8 +2412,8 @@ export default function TaskDetail() {
             placeholder={placeholder}
             disabled={textareaDisabled}
             style={{
-              minHeight: '120px',
-              maxHeight: '300px',
+              minHeight: '200px',
+              maxHeight: '400px',
               marginBottom: 0,
               resize: 'vertical',
               opacity: isDisabledNoInput ? 0.35 : 1,
@@ -2387,8 +2432,8 @@ export default function TaskDetail() {
         ) : (
           <div
             style={{
-              minHeight: '120px',
-              maxHeight: '300px',
+              minHeight: '200px',
+              maxHeight: '400px',
               overflowY: 'auto',
               padding: '10px 14px',
               fontSize: '0.875rem',
