@@ -2,6 +2,31 @@
 
 ---
 
+## 2026-06-14
+
+### Clarify: One-question-at-a-time with option buttons
+
+**Changes:**
+
+- Backend `services/claude_service.py`: Updated clarify prompts (EN and JA) to ask **exactly one question per response**, each followed by a bulleted `Options:` / `選択肢:` block of concrete choices. Removed the "Other (please specify)" option from the framework question — free-text input is always available alongside the buttons.
+
+- Frontend `pages/TaskDetail.tsx`:
+  - Added `parseClarifyQuestion()` — splits a Claude response on the `Options:` / `選択肢:` header into question text and an option list.
+  - `clarify_question` chat cards now render options as **vertically-stacked buttons** (one per line, left-aligned). Buttons are shown only on the latest question card and hidden while a response is streaming.
+  - Clicking an option button sends that option text immediately as the answer — no typing required.
+  - Free-text input via the textarea remains fully available; both paths call the shared `submitClarifyAnswer(userMsg)` helper.
+  - Extracted `submitClarifyAnswer(userMsg: string)` from `handleSendClarifyAnswer()` so button clicks and textarea submit share identical send logic.
+
+### Right-pane UI improvements
+
+**Changes:**
+
+- Frontend `pages/TaskDetail.tsx`:
+  - Removed inner scroll boxes (`maxHeight` + `overflowY: auto`) from all right-pane chat cards: generated prompt text, unit / integration / E2E test case tables, test result table, and review prompt block. The right pane's own scroll now covers all content without nesting.
+  - Raised message input area height: `minHeight 120 → 200 px`, `maxHeight 300 → 400 px` (applies to both the Write textarea and the Markdown Preview div).
+
+---
+
 ## 2026-05-25
 
 ### Input Field Enhancement (Markdown Preview)
