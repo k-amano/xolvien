@@ -731,29 +731,34 @@ Then click the blue **"Send"** button.
 
 ## Step 11 — Answer Claude's questions (requirement clarification phase)
 
-After clicking "Send", Claude will ask clarifying questions:
+After clicking "Send", Claude asks **one question at a time**. Each question appears as a chat card with clickable option buttons below it:
 
 ```
 ┌──────────────────────────────────────────────────────┐
 │ Claude                                               │
-│  Please confirm the following:                       │
-│  1. What programming language / framework to use?    │
-│  2. Which translation API should I use?              │
-│  3. Any design preferences?                          │
+│  What programming language and framework should      │
+│  be used?                                            │
+│                                                      │
+│  [ Vanilla HTML/CSS/JS ]                             │
+│  [ React               ]                             │
+│  [ Vue                 ]                             │
+│  [ TypeScript          ]                             │
 └──────────────────────────────────────────────────────┘
 ```
 
-Type your answers in the input field and click **"Send Answer"**. **Enter key does not send** (it inserts a newline).
+**To answer:** click one of the option buttons, or type a free-text answer in the input field and click **"Send Answer"**. **Enter key does not send** (it inserts a newline).
 
-```
-1. Plain HTML/CSS/JavaScript (no framework)
-2. Please use https://api.mymemory.translated.net (no API key needed)
-3. Simple and clean is fine
-```
+For this guide, answer each question as follows:
 
-Claude may ask follow-up questions. Answer them the same way.
+| Question | Answer |
+|---|---|
+| Programming language / framework? | Click **"Vanilla HTML/CSS/JS"** |
+| Which translation API? | Type `Please use https://api.mymemory.translated.net (no API key needed)` |
+| Any design preferences? | Type `Simple and clean is fine` |
 
-When Claude has enough information, click **"Next"** to move to the prompt generation phase.
+Claude asks follow-up questions one at a time. Answer each one, then wait for the next.
+
+When Claude has enough information, click **"Skip to generate prompt"** to move to the prompt generation phase.
 
 ---
 
