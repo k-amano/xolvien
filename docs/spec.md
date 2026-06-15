@@ -1,6 +1,6 @@
 # Xolvien — Current Specification
 
-**Last updated**: 2026-06-13 (remove FAILED/STOPPED statuses, fix Reset & Rebuild flow, H4 permission fix)
+**Last updated**: 2026-06-15 (file upload, document generation, left-pane activity log added to roadmap)
 
 This document records the specification as currently implemented. Unimplemented future features are described in `roadmap.md`.
 
@@ -124,6 +124,29 @@ Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, t
 | source | ENUM | SYSTEM / DOCKER / CLAUDE / GIT / TEST |
 | message | TEXT | |
 
+**task_documents** (planned — see roadmap)
+
+| Column | Type | Description |
+|---|---|---|
+| id | INTEGER PK | |
+| task_id | INTEGER FK | |
+| doc_type | ENUM | REQUIREMENTS / EXTERNAL_DESIGN / INTERNAL_DESIGN / SPECIFICATION / TEST_REPORT |
+| yaml_content | TEXT | Claude-generated YAML conforming to a fixed schema per doc_type |
+| generated_at | DATETIME | |
+
+**uploads** (planned — see roadmap)
+
+Files uploaded as attachments to instructions. Stored on the host under `backend/uploads/{task_id}/` and passed to Claude as multimodal blocks alongside the instruction text.
+
+| Column | Type | Description |
+|---|---|---|
+| id | INTEGER PK | |
+| task_id | INTEGER FK | |
+| filename | VARCHAR | Original filename |
+| file_type | ENUM | PDF / IMAGE / WORD / EXCEL / TEXT |
+| stored_path | VARCHAR | Absolute path on the host |
+| uploaded_at | DATETIME | |
+
 ---
 
 ## 3. API Endpoints
@@ -179,6 +202,17 @@ GET  /api/v1/tasks/{id}/test-cases/{item_id}/results
 GET /api/v1/tasks/{id}/logs
 WS  /api/v1/ws/tasks/{id}/logs    ← WebSocket
 WS  /api/v1/ws/tasks/{id}/status  ← WebSocket
+
+# File uploads (planned — see roadmap)
+POST /api/v1/tasks/{id}/uploads                                    ← multipart/form-data, multiple files
+
+# Document generation (planned — see roadmap)
+POST /api/v1/tasks/{id}/documents/generate/{doc_type}             ← called internally at phase transitions
+POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html  ← returns file download
+
+# Template management (planned — see roadmap)
+GET  /api/v1/templates/{doc_type}                                  ← list default + custom templates
+POST /api/v1/templates/{doc_type}                                  ← upload custom Excel or HTML template
 ```
 
 ### 3.2 Authentication
@@ -431,4 +465,5 @@ For large projects it is impossible to pre-embed all file contents. Claude Agent
 |---|---|
 | Authentication | Fixed token (`dev-token-12345`). GitHub OAuth not implemented. |
 | Concurrency | Single-user design. Streaming may be delayed with multiple concurrent tasks. |
-| Test report format | Markdown only. Excel format is a future item. |
+| Document generation | Not yet implemented. YAML generation + Excel/HTML template rendering is planned (see roadmap). |
+| File upload | Not yet implemented. Multimodal attachment to instructions (PDF, Word, Excel, images) is planned (see roadmap). |

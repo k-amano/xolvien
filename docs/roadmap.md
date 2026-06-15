@@ -314,38 +314,153 @@ Results from an external agent code review.
 
 ## File Upload for Requirements Analysis
 
-Allow uploading spec documents, design docs, screen mockups, etc. instead of typing requirements as text.
+Allow uploading spec documents, design docs, and screen mockups as attachments to the instruction, covering content that cannot be expressed in text alone (tables, diagrams, embedded images, etc.).
+
+**Primary use case:** Upload a PDF/Word/Excel specification or design document and say "implement according to this spec." The file is passed directly to Claude alongside the text instruction so Claude reads the full document — tables, diagrams, and all — without lossy conversion.
+
+**Secondary use case:** Upload wireframes or UI screenshots (PNG/JPG) as visual supplements to a text instruction.
+
+**File types and how each is passed to Claude:**
+
+| Type | Handling |
+|------|----------|
+| PDF | Uploaded via Claude `files` API and passed as a `document` block — Claude reads text, tables, and embedded images natively. |
+| PNG / JPG | Passed as `image` blocks via Claude Vision. |
+| Word (.docx) | Text and table content extracted with `python-docx` (structure preserved as Markdown-style text). Embedded images extracted separately and passed as `image` blocks. Both combined into a single multimodal message. |
+| Excel (.xlsx) | Each sheet extracted with `openpyxl` as a structured text table (column/row layout preserved). Embedded images extracted and passed as `image` blocks. |
+| Markdown / plain text | Read as-is and included as a `text` block. |
 
 **Backend:**
-- Add `POST /api/v1/tasks/{id}/uploads` endpoint (`multipart/form-data`).
-- Accept PDF / Word / Markdown / images (PNG, JPG); extract and analyze text with Claude.
-- Use extracted text as the base for `Instruction.content`.
+- Add `POST /api/v1/tasks/{id}/uploads` endpoint (`multipart/form-data`), accepting multiple files per request.
+- Process each file according to the table above and store a serialized representation (file bytes for PDF/images; extracted content for Word/Excel) in `backend/uploads/{task_id}/` on the host.
+- Files persist independently of container lifecycle (host-side directory, not inside the container).
+- When `clarify_requirements()` and `execute_instruction()` are called, the stored uploads for the task are included as additional blocks in the Claude API message alongside the text instruction.
+- Add `python-docx` and `openpyxl` to backend dependencies.
 
 **Frontend:**
-- Add file drop zone / file select button to the requirements input area.
-- Progress bar during upload.
-- Show uploaded file names above the input field.
+- Add a file attachment button (paperclip icon) to the instruction input area.
+- Attached filenames are shown as chips above the textarea; each chip has a remove (×) button.
+- Files are uploaded immediately on selection (not on send); a small spinner on the chip indicates upload in progress.
+- No text is auto-populated into the textarea — the user writes their instruction text normally and the files are silently attached.
 
 ---
 
 ## Automatic Document Generation
 
-Automatically generate various documents from the artifacts produced in each implementation and test phase.
+Automatically generate structured documents at each phase of the development flow. Documents are stored as YAML (structured data) and rendered into Excel or HTML via templates at download time — separating data from presentation.
 
-**Documents to generate:**
-- Requirements definition
-- Basic design
-- Detailed design
-- Test reports (separate for unit / integration / E2E)
+---
+
+### Document types and generation timing
+
+| Document | Generated when | Source material |
+|---|---|---|
+| Requirements definition | clarify complete → prompt confirmed (auto) | Clarified Q&A, confirmed prompt |
+| External design (basic design) | Instruction execution complete (auto) | Confirmed prompt, repo file list |
+| Internal design (detailed design) | Instruction execution complete (auto) | Generated code, DB schema, class/method structure |
+| Specification | Test complete (auto) | All of the above + test case items |
+| Test report | Test complete (auto) | Test case results (UT / IT / E2E) |
+
+All documents are generated automatically at the appropriate phase transition — no button press required.
+
+---
+
+### Document content definitions
+
+**Requirements definition**
+- Feature requirements list (what the system does)
+- Screen list and screen transition flow
+- Use cases (who does what)
+- Non-functional requirements (if any emerge from clarify)
+
+**External design (basic design)**
+- Screen design: each screen's layout, fields, buttons, and validation
+- Operation flows: user action → system response, per screen
+- API list: endpoint, method, request/response schema
+- External integrations (if any)
+
+**Internal design (detailed design)**
+- DB design: tables, columns, types, constraints, relationships
+- Class design: class names, responsibilities, dependencies
+- Method/property design: signatures, arguments, return types, processing summary
+
+**Specification**
+- All behaviors defined at minimum unit: input → operation → expected result
+- Linked to test case IDs (TC-NNN / ITC-NNN / E2E-NNN)
+
+**Test report**
+- Test execution summary (passed / failed counts per type)
+- Per-test-case result: TC-ID, test item, expected output, actual output, verdict, executed_at
+
+---
+
+### YAML schema (stored in DB)
+
+Each document is stored as a YAML string in the `task_documents` table:
+
+```
+task_documents
+  id, task_id, doc_type (enum), yaml_content (text), generated_at
+```
+
+Claude is prompted to output valid YAML conforming to a fixed schema per document type. The schema defines top-level keys, array structures, and field names so templates can reliably reference them.
+
+---
+
+### Template system
+
+- **Two output formats**: Excel (`.xlsx`) and HTML (`.html`)
+- **Template engine**: `Jinja2` for HTML; `openpyxl` for Excel (cell-level data injection)
+- **Standard templates**: bundled with the system under `backend/templates/default/{doc_type}/` for both formats
+- **Custom templates**: users can upload their own templates via `POST /api/v1/templates/{doc_type}` (Excel or HTML file); stored under `backend/templates/{user_id}/{doc_type}/` and take precedence over the default
+- **Rendering**: `POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html` — loads YAML from DB, selects the appropriate template, renders, and returns the file as a download
+- PDF export is left to the user (browser print / Excel export)
+
+---
+
+### Backend
+
+- `POST /api/v1/tasks/{id}/documents/generate/{doc_type}` — called internally at each phase transition; Claude generates YAML, saved to `task_documents`
+- `POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html` — renders YAML into the selected template and returns a file download response
+- `POST /api/v1/templates/{doc_type}` — upload a custom template (Excel or HTML); replaces existing custom template for that doc type
+- `GET /api/v1/templates/{doc_type}` — list available templates (default + custom) for a doc type
+- Add `jinja2` and `openpyxl` to backend dependencies (both already available in most Python environments)
+
+---
+
+### Frontend
+
+- No explicit "Generate" button — generation is automatic at each phase transition
+- After each phase completes, a document availability indicator appears in the right pane (e.g. "Requirements definition generated")
+- A "Documents" panel (collapsible) in the task detail page lists all generated documents for the task
+- Each document row shows: doc type, generated_at, and two download buttons: `Excel` and `HTML`
+- A "Templates" section in settings allows uploading custom Excel/HTML templates per document type
+
+---
+
+## Left-Pane Activity Log (Persistent File Logging)
+
+Automatically record all Claude activity displayed in the left pane to a log file on the host so it can be reviewed at any time after the fact.
+
+**What is logged:**
+- Everything that appears in the left pane during an instruction execution: `[Thinking]`, `[Tool: X]`, `[Result]`, text deltas, `[ERROR]` lines, and the `Starting Claude Code CLI...` header.
+- Each log entry includes a timestamp (`ISO 8601`), the task ID, the instruction ID, and the raw log line.
+
+**Storage:**
+- Log files are written to `backend/logs/tasks/{task_id}/` on the host (bind-mounted directory, not inside the container).
+- One file per instruction execution: `instruction_{instruction_id}_{YYYYMMDD_HHMMSS}.log`
+- Files are plain text (UTF-8), one log line per line, with the format: `[{timestamp}] {line}`
+- Logs are never deleted automatically; rotation / archiving is out of scope for now.
 
 **Backend:**
-- Add `POST /api/v1/tasks/{id}/documents/generate` endpoint.
-- Pass implementation prompt, test cases, and test results to Claude to generate Markdown.
-- Save generated documents to DB (`task_documents` table).
+- In `ClaudeCodeService.execute_instruction()`, open the log file before streaming starts and write each yielded line to it as it is emitted.
+- Use Python's built-in `logging` module or direct file I/O with `aiofiles` to avoid blocking the async stream.
+- Create `backend/logs/tasks/{task_id}/` automatically if it does not exist.
+- Ensure the `backend/logs/` directory is bind-mounted into the container via `docker-compose.yml` (so logs land on the host, not inside the container).
+- Add `backend/logs/` to `.gitignore`.
 
 **Frontend:**
-- Add "Generate documents" button to the review screen.
-- Preview and download (Markdown / PDF) of generated documents.
+- No UI changes required — logging is fully automatic and transparent.
 
 ---
 
