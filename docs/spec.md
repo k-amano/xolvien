@@ -1,8 +1,8 @@
-# Xolvien — Current Specification
+# Xolvien — Specification
 
-**Last updated**: 2026-06-15 (file upload, document generation, left-pane activity log added to roadmap)
+**Last updated**: 2026-06-15
 
-This document records the specification as currently implemented. Unimplemented future features are described in `roadmap.md`.
+This document defines the complete intended specification of Xolvien. Implementation status is tracked separately in `roadmap.md`.
 
 ---
 
@@ -18,7 +18,7 @@ Solves the following problems with GitHub Actions + Claude Code AI-driven develo
 
 ### 1.2 Users
 
-Single-user deployment for now. Multi-user support is described in the roadmap.
+Single-user deployment. Multi-user support is a future extension.
 
 ### 1.3 Tech Stack
 
@@ -31,6 +31,8 @@ Single-user deployment for now. Multi-user support is described in the roadmap.
 | Frontend | React 18 + Vite + TypeScript |
 | Real-time communication | WebSocket (FastAPI) |
 | Authentication | Fixed Bearer token (`dev-token-12345`) |
+| Document rendering | Jinja2 (HTML templates), openpyxl (Excel templates) |
+| File parsing | pdfplumber (PDF), python-docx (Word), openpyxl (Excel) |
 
 ---
 
@@ -42,6 +44,8 @@ Single-user deployment for now. Multi-user support is described in the roadmap.
 User ──< Repository ──< Task ──< Instruction
                               └──< TestRun
                               └──< TaskLog
+                              └──< TaskDocument
+                              └──< Upload
 ```
 
 ### 2.2 Task Status Transitions
@@ -52,7 +56,7 @@ PENDING → INITIALIZING → IDLE → RUNNING → TESTING → COMPLETED
 
 Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, the task returns to `IDLE` so work can continue without recreating the task.
 
-### 2.3 Key Table Definitions
+### 2.3 Table Definitions
 
 **tasks**
 
@@ -78,7 +82,7 @@ Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, t
 | output | TEXT | Claude's output |
 | exit_code | INTEGER | |
 
-**test_case_items** (specification, immutable)
+**test_case_items** (specification, immutable per generation)
 
 | Column | Type | Description |
 |---|---|---|
@@ -124,7 +128,7 @@ Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, t
 | source | ENUM | SYSTEM / DOCKER / CLAUDE / GIT / TEST |
 | message | TEXT | |
 
-**task_documents** (planned — see roadmap)
+**task_documents**
 
 | Column | Type | Description |
 |---|---|---|
@@ -134,9 +138,9 @@ Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, t
 | yaml_content | TEXT | Claude-generated YAML conforming to a fixed schema per doc_type |
 | generated_at | DATETIME | |
 
-**uploads** (planned — see roadmap)
+Re-generating a document overwrites the existing row for the same `task_id` + `doc_type` combination.
 
-Files uploaded as attachments to instructions. Stored on the host under `backend/uploads/{task_id}/` and passed to Claude as multimodal blocks alongside the instruction text.
+**uploads**
 
 | Column | Type | Description |
 |---|---|---|
@@ -144,7 +148,7 @@ Files uploaded as attachments to instructions. Stored on the host under `backend
 | task_id | INTEGER FK | |
 | filename | VARCHAR | Original filename |
 | file_type | ENUM | PDF / IMAGE / WORD / EXCEL / TEXT |
-| stored_path | VARCHAR | Absolute path on the host |
+| stored_path | VARCHAR | Absolute path on the host (`backend/uploads/{task_id}/`) |
 | uploaded_at | DATETIME | |
 
 ---
@@ -164,6 +168,9 @@ GET    /api/v1/repositories/{id}
 PATCH  /api/v1/repositories/{id}
 DELETE /api/v1/repositories/{id}
 
+# GitHub repository creation
+POST   /api/v1/repositories/github
+
 # Task management
 GET    /api/v1/tasks
 POST   /api/v1/tasks
@@ -175,16 +182,16 @@ POST   /api/v1/tasks/{id}/git/push          ← streaming
 
 # Instructions & execution
 POST /api/v1/tasks/{id}/instructions
-POST /api/v1/tasks/{id}/instructions/execute-stream                 ← streaming
-POST /api/v1/tasks/{id}/instructions/clarify                        ← streaming
-POST /api/v1/tasks/{id}/instructions/generate-prompt               ← streaming
-POST /api/v1/tasks/{id}/instructions/reset-workspace               ← deletes /workspace/repo and reinits git
-POST /api/v1/tasks/{id}/instructions/generate-test-cases           ← streaming
-POST /api/v1/tasks/{id}/instructions/run-unit-tests                ← streaming
-POST /api/v1/tasks/{id}/instructions/generate-integration-test-cases  ← streaming
-POST /api/v1/tasks/{id}/instructions/run-integration-tests         ← streaming
-POST /api/v1/tasks/{id}/instructions/generate-e2e-test-cases       ← streaming
-POST /api/v1/tasks/{id}/instructions/run-e2e-tests                 ← streaming
+POST /api/v1/tasks/{id}/instructions/execute-stream                    ← streaming
+POST /api/v1/tasks/{id}/instructions/clarify                           ← streaming
+POST /api/v1/tasks/{id}/instructions/generate-prompt                   ← streaming
+POST /api/v1/tasks/{id}/instructions/reset-workspace
+POST /api/v1/tasks/{id}/instructions/generate-test-cases               ← streaming
+POST /api/v1/tasks/{id}/instructions/run-unit-tests                    ← streaming
+POST /api/v1/tasks/{id}/instructions/generate-integration-test-cases   ← streaming
+POST /api/v1/tasks/{id}/instructions/run-integration-tests             ← streaming
+POST /api/v1/tasks/{id}/instructions/generate-e2e-test-cases           ← streaming
+POST /api/v1/tasks/{id}/instructions/run-e2e-tests                     ← streaming
 GET  /api/v1/tasks/{id}/instructions
 GET  /api/v1/tasks/{id}/instructions/{instruction_id}
 GET  /api/v1/tasks/{id}/instructions/last-completed
@@ -203,16 +210,17 @@ GET /api/v1/tasks/{id}/logs
 WS  /api/v1/ws/tasks/{id}/logs    ← WebSocket
 WS  /api/v1/ws/tasks/{id}/status  ← WebSocket
 
-# File uploads (planned — see roadmap)
-POST /api/v1/tasks/{id}/uploads                                    ← multipart/form-data, multiple files
+# File uploads
+POST /api/v1/tasks/{id}/uploads                                        ← multipart/form-data, multiple files
 
-# Document generation (planned — see roadmap)
-POST /api/v1/tasks/{id}/documents/generate/{doc_type}             ← called internally at phase transitions
+# Document generation and rendering
+POST /api/v1/tasks/{id}/documents/generate/{doc_type}                  ← called internally at phase transitions
 POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html  ← returns file download
+GET  /api/v1/tasks/{id}/documents                                       ← list generated documents for a task
 
-# Template management (planned — see roadmap)
-GET  /api/v1/templates/{doc_type}                                  ← list default + custom templates
-POST /api/v1/templates/{doc_type}                                  ← upload custom Excel or HTML template
+# Template management
+GET  /api/v1/templates/{doc_type}                                       ← list default + custom templates
+POST /api/v1/templates/{doc_type}                                       ← upload custom Excel or HTML template
 ```
 
 ### 3.2 Authentication
@@ -223,19 +231,22 @@ All endpoints require the `Authorization: Bearer dev-token-12345` header.
 
 ## 4. Execution Flow
 
-### 4.1 New Task Flow (current implementation)
+### 4.1 Task Flow
 
 ```
-1.  Enter instruction
-2.  Requirement clarification (Claude ↔ user) ← can be skipped
+1.  Enter instruction text (and optionally attach files)
+2.  Requirement clarification (Claude ↔ user Q&A, one question at a time) ← can be skipped
 3.  Prompt review → user approves
+    → Requirements definition document auto-generated (YAML → task_documents)
 4.  Claude executes implementation (commits automatically)
+    → External design document auto-generated
+    → Internal design document auto-generated
 5.  Claude auto-generates unit test case list (TC-001 format)
 6.  User reviews unit test cases → approves
 7.  Claude generates unit test code → runs tests
 8.  Auto-fix loop on failure (up to 3 attempts)
 9.  Unit tests pass → auto-advance to integration test step
-10. Claude generates integration test case list (ITC-001 format, separate from unit TCs)
+10. Claude generates integration test case list (ITC-001 format)
 11. User reviews integration test cases → approves
 12. Claude generates integration test code → starts server + DB → runs tests
 13. Auto-fix loop on failure (up to 3 attempts)
@@ -244,6 +255,8 @@ All endpoints require the `Authorization: Bearer dev-token-12345` header.
 16. User reviews E2E test cases → approves
 17. Claude generates Playwright test code → runs headless browser tests (with screenshots)
 18. Auto-fix loop on failure (up to 3 attempts)
+    → Specification document auto-generated
+    → Test report document auto-generated
 19. User reviews implementation → approve / send back
 20. Git Push
 ```
@@ -266,23 +279,146 @@ Each completed step in the step bar can be clicked to navigate directly to that 
 
 ---
 
-## 5. Frontend UI
+## 5. File Upload
 
-### 5.1 Screen Layout
+Users can attach files to an instruction when text alone is insufficient — for example, uploading a PDF specification and writing "implement according to this spec."
+
+### 5.1 Supported File Types and Processing
+
+| Type | How it is passed to Claude |
+|---|---|
+| PDF | Uploaded via Claude `files` API and passed as a `document` block — text, tables, and embedded images are read natively by Claude. |
+| PNG / JPG | Passed as `image` blocks via Claude Vision. |
+| Word (.docx) | Text and table content extracted with `python-docx` (structure preserved). Embedded images extracted separately and passed as `image` blocks. Both combined into a single multimodal message. |
+| Excel (.xlsx) | Each sheet extracted with `openpyxl` as a structured text table (column/row layout preserved). Embedded images extracted and passed as `image` blocks. |
+| Markdown / plain text | Read as-is and included as a `text` block. |
+
+### 5.2 Storage
+
+- Files are stored on the host under `backend/uploads/{task_id}/`, independent of container lifecycle.
+- Multiple files can be attached per instruction.
+- When `clarify_requirements()` and `execute_instruction()` are called, the stored uploads for the task are included as additional blocks in the Claude API message.
+
+### 5.3 Frontend Behavior
+
+- A file attachment button (paperclip icon) is shown in the instruction input area.
+- Attached filenames appear as chips above the textarea; each chip has a remove (×) button.
+- Files are uploaded immediately on selection; a spinner on the chip indicates upload in progress.
+- The textarea is not auto-populated — the user writes instruction text normally and files are attached silently.
+
+---
+
+## 6. Document Generation
+
+Documents are generated automatically at each phase transition. They are stored as YAML (structured data) in the `task_documents` table and rendered into Excel or HTML via templates at download time.
+
+### 6.1 Document Types and Generation Timing
+
+| Document | Generated when | Source material |
+|---|---|---|
+| Requirements definition | Prompt confirmed (step 3) | Clarified Q&A, confirmed prompt |
+| External design | Implementation complete (step 4) | Confirmed prompt, repo file list |
+| Internal design | Implementation complete (step 4) | Generated code, DB schema, class/method structure |
+| Specification | All tests complete (step 18) | All of the above + test case items |
+| Test report | All tests complete (step 18) | Test case results (UT / IT / E2E) |
+
+### 6.2 Document Content Definitions
+
+**Requirements definition**
+- Feature requirements list (what the system does)
+- Screen list and screen transition flow
+- Use cases (who does what, under what conditions)
+- Non-functional requirements (if any emerge from clarify)
+
+**External design**
+- Screen design: each screen's layout, fields, buttons, and validation rules
+- Operation flows: user action → system response, per screen
+- API list: endpoint, method, request/response schema
+- External integrations (if any)
+
+**Internal design**
+- DB design: tables, columns, types, constraints, relationships
+- Class design: class names, responsibilities, dependencies
+- Method/property design: signatures, arguments, return types, processing summary
+
+**Specification**
+- All behaviors defined at minimum unit: input value → operation → expected result
+- Each item linked to a test case ID (TC-NNN / ITC-NNN / E2E-NNN)
+
+**Test report**
+- Test execution summary (passed / failed counts per type: UT / IT / E2E)
+- Per-test-case result: TC-ID, test item, expected output, actual output, verdict, executed_at
+
+### 6.3 YAML Schema
+
+Each document is stored as a YAML string conforming to a fixed schema per `doc_type`. The schema defines top-level keys, array structures, and field names so that templates can reliably reference them by name.
+
+### 6.4 Template System
+
+- **Two output formats**: Excel (`.xlsx`) and HTML (`.html`)
+- **Template engines**: Jinja2 for HTML; openpyxl for Excel (cell-level data injection)
+- **Standard templates**: bundled under `backend/templates/default/{doc_type}/` for both formats
+- **Custom templates**: uploaded by the user via `POST /api/v1/templates/{doc_type}`; stored under `backend/templates/{user_id}/{doc_type}/` and take precedence over the default
+- **Rendering**: `POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html` loads YAML from DB, selects the appropriate template, renders, and returns the file as a download response
+- PDF export is performed by the user via browser print or Excel
+
+### 6.5 Frontend Behavior
+
+- Document generation is fully automatic — no button press required.
+- After each phase transition that triggers generation, a notice appears in the right pane chat history (e.g. "Requirements definition generated").
+- A "Documents" panel in the task detail page lists all generated documents for the task with their `generated_at` timestamps.
+- Each document row has two download buttons: `Excel` and `HTML`.
+- A "Templates" section in settings allows uploading custom Excel/HTML templates per document type.
+
+---
+
+## 7. Left-Pane Activity Log
+
+All Claude activity displayed in the left pane is automatically written to a log file on the host for later review.
+
+### 7.1 What is Logged
+
+Everything that appears in the left pane during instruction execution:
+- `Starting Claude Code CLI...` header
+- `[Thinking]`, `[Tool: X]`, `[Result]` lines
+- Text delta lines (Claude's response text)
+- `[ERROR]` lines
+
+Each entry is written in the format: `[{ISO8601 timestamp}] {line}`
+
+### 7.2 Storage
+
+- Log files are written to `backend/logs/tasks/{task_id}/` on the host.
+- One file per instruction execution: `instruction_{instruction_id}_{YYYYMMDD_HHMMSS}.log`
+- Files are never deleted automatically.
+- `backend/logs/` is bind-mounted from the host into the backend process so logs persist independently of container lifecycle.
+- `backend/logs/` is listed in `.gitignore`.
+
+### 7.3 Implementation
+
+- `ClaudeCodeService.execute_instruction()` opens the log file before streaming starts and appends each yielded line using `aiofiles` (non-blocking).
+- The log directory is created automatically if it does not exist.
+
+---
+
+## 8. Frontend UI
+
+### 8.1 Screen Layout
 
 | Screen | Description |
 |---|---|
 | Dashboard | Task list. Status badges, create button. |
-| Task creation modal | Repository selection (existing / new), title and branch name inputs. |
+| Task creation modal | Repository selection (existing / new / GitHub), title and branch name inputs. |
 | Task detail screen | Left/right split pane (log area / control panel), resizable. |
+| Settings | Custom template upload per document type. |
 
-### 5.2 Control Panel Design (ChatEntry append-only)
+### 8.2 Control Panel Design (ChatEntry append-only)
 
-Replaced `PromptState`-based screen switching with an append-only chat history via a `ChatEntry` union type. All phases (requirement Q&A / prompt generation / implementation / test cases / test results / review / error / system notices) accumulate as persistent cards in the chat panel.
+An append-only chat history via a `ChatEntry` union type. All phases accumulate as persistent cards.
 
 ```
 ChatEntry =
-  | user_instruction               ← user's instruction
+  | user_instruction               ← user's instruction (with attached file chips if any)
   | clarify_question               ← Claude's question (parsed into question text + option buttons)
   | clarify_answer                 ← user's answer
   | clarify_streaming              ← streaming in progress
@@ -293,24 +429,24 @@ ChatEntry =
   | test_cases_generating
   | test_cases_ready               ← unit test case list (with approved flag)
   | integration_test_cases_generating
-  | integration_test_cases_ready  ← integration test case list (with approved flag)
+  | integration_test_cases_ready   ← integration test case list (with approved flag)
   | e2e_test_cases_generating
-  | e2e_test_cases_ready          ← E2E test case list (with approved flag)
+  | e2e_test_cases_ready           ← E2E test case list (with approved flag)
   | test_running
   | test_done                      ← test result summary
   | review                         ← implementation review (with resolved flag)
   | error
-  | info                           ← system notice
+  | info                           ← system notice (including document generation notices)
 ```
 
 The button set below the input area switches based on `selectedStep`:
 
 | selectedStep | Textarea | Buttons |
 |---|---|---|
-| implement — initial (no prior completed instruction) | Enabled (instruction input) | Send |
-| implement — redo (prior completed instruction exists) | Enabled (instruction input) | Modify / Reset & Rebuild |
-| implement — clarify in progress | Enabled (free-text answer input) | Send Answer / Skip to generate prompt (option buttons also shown in the question card) |
-| implement — unconfirmed prompt present | Enabled (feedback input) | Confirm & Execute / Regenerate |
+| implement — initial (no prior completed instruction) | Enabled | Send |
+| implement — redo (prior completed instruction exists) | Enabled | Modify / Reset & Rebuild |
+| implement — clarify in progress | Enabled | Send Answer / Skip to generate prompt (option buttons also shown in the question card) |
+| implement — unconfirmed prompt present | Enabled | Confirm & Execute / Regenerate |
 | unit_test | Disabled | Generate test cases / Approve & run tests / Request revision / Re-run tests / Regenerate test cases |
 | integration_test | Disabled | Generate integration test cases / Approve & run integration tests / Request revision / Re-run integration tests / Regenerate integration test cases |
 | e2e_test | Disabled | Generate E2E test cases / Approve & run E2E tests / Request revision / Re-run E2E tests / Regenerate E2E test cases |
@@ -318,14 +454,12 @@ The button set below the input area switches based on `selectedStep`:
 
 **Modify vs Reset & Rebuild**
 
-When a prior completed instruction exists (i.e. code has already been generated), the implement step shows two buttons instead of one:
+When a prior completed instruction exists, the implement step shows two buttons:
 
-- **Modify**: Starts the clarify → prompt generation → execute flow with the existing `/workspace/repo` code intact. Claude sees the current codebase and makes targeted changes.
-- **Reset & Rebuild**: Deletes all files under `/workspace/repo` and reinitialises a bare git repository, then starts the clarify → prompt generation → execute flow from scratch.
+- **Modify**: Starts the clarify → prompt generation → execute flow with the existing `/workspace/repo` intact. Claude makes targeted changes to existing code.
+- **Reset & Rebuild**: Calls `POST /reset-workspace` to delete all files under `/workspace/repo` and reinitialise a bare git repo, then starts the clarify flow from scratch.
 
-The backend provides `POST /api/v1/tasks/{id}/instructions/reset-workspace` to perform the deletion and git reinit. The frontend calls this endpoint before starting the clarify flow when "Reset & Rebuild" is chosen.
-
-### 5.3 Step Bar
+### 8.3 Step Bar
 
 Always visible at the top of the control panel. Steps: Implement → Unit Test → Integration Test → E2E Test → Review
 
@@ -337,133 +471,123 @@ Always visible at the top of the control panel. Steps: Implement → Unit Test �
 | Yellow background, black text | Selected (navigated to by click) |
 | Grey | Not yet started |
 
-### 5.4 Real-time Progress Display
+### 8.4 Real-time Progress Display
 
-During test case generation (unit / integration / E2E), the right pane chat entry (`test_cases_generating` etc.) updates live as each batch completes:
+During test case generation (unit / integration / E2E), the chat entry updates live:
 
 - Shows `Generating test cases: done / total  (~mm:ss remaining)` (EN) or `テストケース生成中: done / total 件  (残り約mm:ss)` (JA).
-- Remaining time is computed from elapsed time per batch × remaining batches and formatted as `mm:ss` (or `hh:mm:ss` if ≥ 1 hour).
-- The same format is used for test code generation progress (`progressGenCode`) during test execution.
-- Progress display also appears in the left-pane status banner.
+- Remaining time computed from elapsed time per batch × remaining batches, formatted as `mm:ss` (or `hh:mm:ss` if ≥ 1 hour).
+- The same format is used for test code generation progress during test execution.
 
-### 5.5 Test Case Review Card Operations
+### 8.5 Test Case Review Card Operations
 
 - Review TC-ID, target screen, test item, operation, and expected output in the chat history card.
-- Click "Approve & run tests" in the button area below the input to start testing.
+- Click "Approve & run tests" to start testing.
 - Click "Request revision" to expand an inline input field. Enter revision details and click "Send" to regenerate test cases.
 - After test completion, both "Re-run tests" and "Regenerate test cases" are available.
 
-### 5.6 Test Result Display
+### 8.6 Test Result Display
 
 - Test result summary shows TC-count-based numbers (e.g. "45 passed, 5 failed").
 - Test result table: TC-ID / test item / expected output / actual output / verdict / executed_at.
-- Actual output is collected by the backend from each test function's `console.log('XOLVIEN_RESULT:{...}')` output (recorded for both PASSED and FAILED).
+- Actual output collected from each test function's `console.log('XOLVIEN_RESULT:{...}')` output (recorded for both PASSED and FAILED).
 - Restored from DB `test_case_results` after page reload.
 
 ---
 
-## 6. Backend Design
+## 9. Backend Design
 
-### 6.1 Directory Structure
+### 9.1 Directory Structure
 
 ```
-backend/app/
-├── main.py          # FastAPI app, router registration, CORS
-├── config.py        # Pydantic Settings (loads from .env)
-├── database.py      # Async SQLAlchemy engine + get_db()
-├── models/          # SQLAlchemy ORM models
-├── schemas/         # Pydantic request/response schemas
-├── api/             # FastAPI routers (one file per resource)
-├── services/
-│   ├── docker_service.py   # Container lifecycle management
-│   ├── claude_service.py   # Claude Code CLI execution & test running
-│   └── test_service.py     # Test result parsing
-└── websocket/
-    └── manager.py          # Per-task WebSocket connection pool
+backend/
+├── app/
+│   ├── main.py          # FastAPI app, router registration, CORS
+│   ├── config.py        # Pydantic Settings (loads from .env)
+│   ├── database.py      # Async SQLAlchemy engine + get_db()
+│   ├── models/          # SQLAlchemy ORM models
+│   ├── schemas/         # Pydantic request/response schemas
+│   ├── api/             # FastAPI routers (one file per resource)
+│   ├── services/
+│   │   ├── docker_service.py    # Container lifecycle management
+│   │   ├── claude_service.py    # Claude Code CLI execution & test running
+│   │   ├── document_service.py  # Document YAML generation and template rendering
+│   │   ├── upload_service.py    # File upload processing (PDF/Word/Excel/image)
+│   │   └── test_service.py      # Test result parsing
+│   └── websocket/
+│       └── manager.py           # Per-task WebSocket connection pool
+├── templates/
+│   ├── default/                 # Bundled standard templates (Excel + HTML per doc_type)
+│   └── {user_id}/               # User-uploaded custom templates
+├── uploads/
+│   └── {task_id}/               # Uploaded files (host-side, persisted)
+└── logs/
+    └── tasks/
+        └── {task_id}/           # Left-pane activity logs (host-side, persisted)
 ```
 
-### 6.2 ClaudeCodeService Key Methods
+### 9.2 ClaudeCodeService Key Methods
 
 | Method | Description |
 |---|---|
-| `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. |
-| `clarify_requirements()` | Requirement clarification Q&A. Asks **one question at a time**, each with a bulleted `Options:` / `選択肢:` block. The frontend parses this into a question text + clickable option buttons; the user can also type a free-text answer. Continues until the user clicks "Skip to generate prompt". |
+| `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. Writes each line to the activity log file via `aiofiles`. |
+| `clarify_requirements()` | Requirement clarification Q&A. Asks one question at a time, each with a bulleted `Options:` / `選択肢:` block. Continues until the user clicks "Skip to generate prompt". |
 | `generate_prompt()` | Converts a brief instruction into an optimized prompt. |
-| `generate_test_cases()` | Generates unit (`TC-NNN` / `test_tc001_`), integration (`ITC-NNN` / `test_itc001_`), or E2E (`E2E-NNN` / `test_e2e001_`) test cases based on the `test_type` argument. Deletes only existing TCs of the same `test_type` before saving. Uses batch generation via `--output-format json` + `--resume <session_id>` (10 cases per Claude call) to support large test suites. Yields `[XOLVIEN_PROGRESS] done/total elapsed_ms=N eta_ms=0` after each batch for real-time progress display. |
+| `generate_test_cases()` | Generates UNIT (`TC-NNN`), INTEGRATION (`ITC-NNN`), or E2E (`E2E-NNN`) test cases based on `test_type`. Uses batch generation via `--output-format json` + `--resume` (10 cases per call). Yields `[XOLVIEN_PROGRESS] done/total elapsed_ms=N eta_ms=0` after each batch. |
 | `run_unit_tests()` | Wrapper passing `TestType.UNIT` to `_run_tests()`. |
 | `run_integration_tests()` | Wrapper passing `TestType.INTEGRATION` to `_run_tests()`. |
 | `run_e2e_tests()` | Wrapper passing `TestType.E2E` to `_run_tests()`. |
-| `_run_tests()` | Shared implementation of: generate test code → run → auto-fix loop (up to 3 attempts). Switches behavior by `TestType`. Aborts immediately on infrastructure errors (EACCES etc.). |
-| `_detect_test_command()` | Checks `package.json` first, then `pyproject.toml` / `setup.py` for Python. Does not infer Python from `requirements.txt` alone. Also verifies pytest is actually installed. |
-| `_extract_result_for_function()` | Handles both Jest (`--verbose` `✓/✕ TC-xxx:` lines) and pytest verbose (`PASSED/FAILED` lines) to determine verdict. |
+| `_run_tests()` | Shared implementation: generate test code → run → auto-fix loop (up to 3 attempts). Aborts immediately on infrastructure errors (EACCES etc.). |
+| `_detect_test_command()` | Checks `package.json` first, then `pyproject.toml` / `setup.py`. Does not infer Python from `requirements.txt` alone. |
+| `_extract_result_for_function()` | Handles Jest (`--verbose` `✓/✕ TC-xxx:`) and pytest verbose (`PASSED/FAILED`) output to determine verdict. |
 
-### 6.3 Docker Workspace
+### 9.3 DocumentService
+
+| Method | Description |
+|---|---|
+| `generate_document(task_id, doc_type)` | Calls Claude to generate a YAML document of the given type. Saves to `task_documents`. Called internally at phase transitions. |
+| `render_document(task_id, doc_type, format)` | Loads YAML from DB, selects the appropriate template (custom if available, otherwise default), renders via Jinja2 (HTML) or openpyxl (Excel), returns file bytes. |
+
+### 9.4 UploadService
+
+| Method | Description |
+|---|---|
+| `process_upload(task_id, file)` | Saves the file to `backend/uploads/{task_id}/`, extracts content per file type, saves metadata to `uploads` table. Returns the content blocks to be passed to Claude. |
+| `get_upload_blocks(task_id)` | Returns all upload content blocks for a task, ready to be injected into a Claude API message as multimodal content. |
+
+### 9.5 Docker Workspace
 
 - Image: `xolvien-workspace:latest` (`docker/workspace/Dockerfile`)
 - Contents: Python 3.11-slim + Git + Node.js 20 + Claude Code CLI
 - Per-task volume: `xolvien-task-{task_id}-data` (mounted at `/workspace`)
 - SSH keys: host `~/.ssh/` mounted into the container (for GitHub auth)
-- Claude credentials: only `~/.claude/.credentials.json` is copied into `/home/xolvien/.claude/` (not the full directory). The target directory is created with `mkdir -p` before copying via `put_archive`, and ownership is set to `xolvien:xolvien`.
+- Claude credentials: only `~/.claude/.credentials.json` copied into `/home/xolvien/.claude/`
 
-### 6.4 Test Execution Details
+### 9.6 Test Execution Details
 
-- `_detect_test_command()` checks `package.json` (Node.js) → `pyproject.toml` / `setup.py` (Python) in that order. `requirements.txt` alone does not imply Python.
-- Node.js projects run `npm test -- --watchAll=false --verbose 2>&1`; Python runs `python -m pytest -v 2>&1`.
-- Before test execution, the backend (root) pre-creates JSONL files with `chmod 777`: unit: `/tmp/xolvien_tc_results.jsonl`, integration: `/tmp/xolvien_itc_results.jsonl`, E2E: `/tmp/xolvien_e2e_results.jsonl`. Test code logs actual output via `console.log('XOLVIEN_RESULT:{"tc_id":"TC-001","actual":"..."}')` / `ITC-001` / `E2E-001`.
-- Backend parses `XOLVIEN_RESULT:` lines from test output and saves to `test_case_results.actual_output`.
-- `test_run.summary` is generated by aggregating verdicts from `test_case_results` (TC-count based, not test function count).
-- Auto-fix loop (up to 3 attempts): fix prompt instructs "fix only, do not re-run tests"; the backend handles re-running.
-- EACCES / EPERM / Cannot find module etc. abort the loop immediately without attempting auto-fix.
-- Missing dependencies are detected and installed by Claude Agent.
-- Test report path: `/workspace/repo/test-reports/test-report-{datetime}-{type}.md`.
+- Node.js projects: `npm test -- --watchAll=false --verbose 2>&1`; Python: `python -m pytest -v 2>&1`
+- Before test execution, the backend pre-creates JSONL result files with `chmod 777`: `/tmp/xolvien_tc_results.jsonl` (unit), `/tmp/xolvien_itc_results.jsonl` (integration), `/tmp/xolvien_e2e_results.jsonl` (E2E)
+- Test code logs actual output via `console.log('XOLVIEN_RESULT:{"tc_id":"TC-001","actual":"..."}')` for both PASSED and FAILED
+- `test_run.summary` aggregated from `test_case_results` verdicts (TC-count based)
+- Auto-fix loop: up to 3 attempts; fix prompt instructs "fix only, do not re-run tests"; backend handles re-running
+- EACCES / EPERM / Cannot find module abort the loop immediately
+- Test report path: `/workspace/repo/test-reports/test-report-{datetime}-{type}.md`
+- E2E screenshots saved to `/workspace/repo/test-reports/screenshots/{E2E-NNN}.png`
 
-**Integration test specifics**
-
-- `[ITEST]` tag used in log output.
-- Test case generation prompt is integration-specific (validates API endpoints, DB operations, cross-component interaction). `ITC-NNN` / `test_itc001_` format.
-- Test code generation prompt includes server startup instructions (supertest / pytest + httpx) and HTTP-request-based test patterns.
-- Uses independent `test_case_items` with `test_type=INTEGRATION`.
-- Results saved to the same `test_case_results` table, linked by `test_run_id`.
-- `GET /test-cases?test_type=unit|integration|e2e` filtering supported.
-
-**E2E test specifics**
-
-- `[E2E]` tag used in log output.
-- Test case generation prompt is E2E-specific (validates browser operation scenarios). `E2E-NNN` / `test_e2e001_` format.
-  - Concrete URL, click operations, input values, and expected on-screen text are required.
-  - Targets ~8–12 user scenario cases.
-- Playwright-specific instructions added to test code generation prompt:
-  - Run `npm install --save-dev @playwright/test` or `pip install playwright && playwright install chromium`.
-  - Start the app in the background before running Playwright tests.
-  - Run in headless mode (`headless: true`).
-  - Save a screenshot to `/workspace/repo/test-reports/screenshots/{E2E-NNN}.png` after each test.
-- Uses independent `test_case_items` with `test_type=E2E`.
-
-### 6.5 Design Decisions
+### 9.7 Design Decisions
 
 **Keepalive thread prevents stream silence**
 
-`_RUNNER_SCRIPT` and `_RUNNER_SCRIPT_AGENT` both spawn a daemon thread that writes `[Claude] ...\n` to stdout every 3 seconds while Claude is running. This ensures the `execute_command_stream` chunk timeout (120 s) is never hit during normal inter-tool pauses. The 3-second interval is the maximum acceptable silence from a UX standpoint. The thread is a daemon so it terminates automatically when Claude exits.
+`_RUNNER_SCRIPT` and `_RUNNER_SCRIPT_AGENT` spawn a daemon thread that writes `[Claude] ...\n` to stdout every 3 seconds while Claude is running. This ensures the `execute_command_stream` chunk timeout (120 s) is never hit during normal inter-tool pauses.
 
 **Errors are logged, not persisted as task status**
 
-When `execute_instruction()` raises an error (e.g. stream timeout or permission error), the task status is reset to `IDLE` and the error message is appended to `task_logs` with `source=SYSTEM`. The user can send a new instruction, click "Reset & Rebuild", or otherwise continue without recreating the task. `FAILED` and `STOPPED` statuses were removed because they blocked all UI operations without providing a recovery path.
+When `execute_instruction()` raises an error, the task status is reset to `IDLE` and the error is appended to `task_logs` with `source=SYSTEM`. `FAILED` and `STOPPED` statuses do not exist — they would block all UI operations without providing a recovery path.
 
-**Why prompt generation also runs in agent mode**
+**Prompt generation runs in agent mode**
 
-For large projects it is impossible to pre-embed all file contents. Claude Agent must be able to select and read relevant files from the repository itself to generate an accurate prompt — agent mode is required. Switching to `-p` mode would break this for large projects.
+For large projects it is impossible to pre-embed all file contents. Claude Agent must select and read relevant files from the repository itself to generate an accurate prompt.
 
 **Streaming uses synchronous blocking**
 
-`execute_command_stream` uses the synchronous docker-py API and simulates async with `asyncio.sleep(0.01)`. This may delay other requests during concurrent task execution, but is acceptable for single-user use. Multi-user support will move this to a thread pool via `run_in_executor`.
-
----
-
-## 7. Known Limitations
-
-| Item | Details |
-|---|---|
-| Authentication | Fixed token (`dev-token-12345`). GitHub OAuth not implemented. |
-| Concurrency | Single-user design. Streaming may be delayed with multiple concurrent tasks. |
-| Document generation | Not yet implemented. YAML generation + Excel/HTML template rendering is planned (see roadmap). |
-| File upload | Not yet implemented. Multimodal attachment to instructions (PDF, Word, Excel, images) is planned (see roadmap). |
+`execute_command_stream` uses the synchronous docker-py API and simulates async with `asyncio.sleep(0.01)`. This is acceptable for single-user use. Multi-user support will move this to a thread pool via `run_in_executor`.
