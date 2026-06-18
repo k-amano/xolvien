@@ -222,6 +222,9 @@ export const ja = {
   e2eTCGenError: 'E2Eテストケース生成エラー: ',
   e2eTestRunError: 'E2Eテスト実行エラー: ',
   testCaseRevisionError: 'テストケース再生成エラー: ',
+  gitPushError: 'Git push エラー: ',
+  errorBannerActionsLabel: '対処:',
+  errorBannerDismiss: '閉じる',
   approvedMsg: '実装を承認しました。新しい指示を入力してください。',
   rejectedMsg: '差し戻しました。指示を修正して再実行してください。',
 

@@ -208,6 +208,9 @@ export const en = {
   e2eTCGenError: 'E2E test case generation error: ',
   e2eTestRunError: 'E2E test run error: ',
   testCaseRevisionError: 'Test case revision error: ',
+  gitPushError: 'Git push error: ',
+  errorBannerActionsLabel: 'What to do:',
+  errorBannerDismiss: 'Dismiss',
   approvedMsg: 'Implementation approved. Enter a new instruction.',
   rejectedMsg: 'Rejected. Edit the instruction and retry.',
 

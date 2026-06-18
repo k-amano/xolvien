@@ -2,6 +2,37 @@
 
 ---
 
+## 2026-06-18
+
+### Cause-based error display + unified exception handling (Roadmap Sprint 1.1 + 1.3)
+
+Replaced raw error messages with a **cause-based error-code system**. The backend
+is the source of truth; the frontend looks up human-friendly copy by code and
+shows a banner with *what happened + plain-language cause + concrete recovery
+actions*. **The raw exception text is never shown to the user** — it goes only to
+the left log pane.
+
+**Error taxonomy (9 codes):** `CONTAINER_NOT_RUNNING`, `TIMEOUT`,
+`CLAUDE_API_ERROR`, `CLAUDE_PERMISSION_LOOP`, `GIT_AUTH_FAILED`,
+`GIT_PUSH_REJECTED`, `TEST_INFRA_ERROR`, `NETWORK_ERROR`, `UNKNOWN`.
+
+**Backend:**
+- NEW `app/errors.py`: `ErrorCode` enum, `XolvienError` typed exception, a string-heuristic `classify_exception` / `classify_text`, `error_payload`, and `error_sentinel_line`.
+- `main.py`: registered FastAPI exception handlers (`XolvienError`, Starlette `HTTPException`, bare `Exception`) standardizing all **non-streaming** responses to `{ code, message, detail }`.
+- `api/instructions.py` (8 streaming endpoints) + `api/tasks.py` (git push): on error, emit a terminal `[[XOLVIEN_ERROR:CODE]] detail` sentinel line instead of a plain `[ERROR]` line (streams have already committed HTTP 200).
+
+**Frontend:**
+- NEW `src/errors.ts`: mirrors the enum + a fallback `classifyError(status, text)` (status 0 ⇒ `NETWORK_ERROR`) + `extractSentinel` + `codeFromBody`. Kept in sync with the backend rules.
+- NEW `src/i18n/errorCatalog.ts`: `Record<ErrorCode, {title, cause, actions[]}>` for JA + EN; wired into `useLang()` via `i18n/index.ts`.
+- `services/api.ts`: added a shared `pumpStream()` helper that strips the sentinel before forwarding text to `onChunk`, resolves a code at the stream boundary, and classifies HTTP/network failures. All stream callbacks changed from `onError(err: string)` to `onError(code, detail)`. Git auth/reject failures (HTTP 200 with in-stream text) are classified client-side on completion.
+- `pages/TaskDetail.tsx`: `activeError` is now an `ErrorCode`; `raiseError(code, detail)` raises the banner + appends a code-keyed chat entry + pushes `detail` to the left log pane via `logErrorDetail()`. The banner renders title/cause/actions from the catalog. All ~17 error sites (clarify ×2, prompt gen, regenerate, implementation, unit/integration/e2e test runs, test-case gen + fetch ×4, revision, git push, session restore, reset) updated to pass codes. Action buttons + Git Push stay gated on `activeError`.
+
+**Risk notes:** the sentinel is detected only at end-of-stream and stripped before reaching `onChunk`, so clarify's `PROMPT_READY` detection and the test-progress parser never see it; `onDone` is skipped when a sentinel fires.
+
+**Drive-by:** fixed two pre-existing unused-variable build errors (`runningTestType`, `testPhaseLabel`) so `npm run build` passes clean.
+
+---
+
 ## 2026-06-14
 
 ### Clarify: One-question-at-a-time with option buttons

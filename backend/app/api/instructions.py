@@ -12,6 +12,7 @@ from app.models.test_run import TestType
 from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest, RunIntegrationTestsRequest, RunE2ETestsRequest
 from app.api.auth import verify_token
 from app.services.claude_service import get_claude_service
+from app.errors import XolvienError, classify_exception, error_sentinel_line
 
 router = APIRouter(prefix="/api/v1/tasks/{task_id}/instructions", tags=["instructions"])
 
@@ -77,10 +78,9 @@ async def execute_instruction_stream(
                 db, task_id, instruction_data.content
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"\n[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"\n[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -142,10 +142,9 @@ async def generate_prompt_stream(
                 db, task_id, data.content, data.feedback or "", lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -179,10 +178,9 @@ async def clarify_requirements_stream(
                 db, task_id, data.instruction, [m.model_dump() for m in data.history], data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -216,10 +214,9 @@ async def generate_test_cases_stream(
                 db, task_id, data.implementation_prompt, lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -249,10 +246,9 @@ async def generate_integration_test_cases_stream(
                 db, task_id, data.implementation_prompt, TestType.INTEGRATION, lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -285,10 +281,9 @@ async def run_unit_tests_stream(
                 db, task_id, data.implementation_prompt, lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -321,10 +316,9 @@ async def run_integration_tests_stream(
                 db, task_id, data.implementation_prompt, lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -354,10 +348,9 @@ async def generate_e2e_test_cases_stream(
                 db, task_id, data.implementation_prompt, TestType.E2E, lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),
@@ -390,10 +383,9 @@ async def run_e2e_tests_stream(
                 db, task_id, data.implementation_prompt, lang=data.lang
             ):
                 yield chunk
-        except ValueError as e:
-            yield f"[ERROR] {str(e)}\n"
         except Exception as e:
-            yield f"[ERROR] Unexpected error: {str(e)}\n"
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
 
     return StreamingResponse(
         generate(),

@@ -1,6 +1,8 @@
 import { createContext, useContext, useState } from 'react'
 import { ja } from './ja'
 import { en } from './en'
+import { getErrorCatalog, type ErrorCopy } from './errorCatalog'
+import type { ErrorCode } from '../errors'
 
 export type Lang = 'ja' | 'en'
 
@@ -16,12 +18,14 @@ export const translations: Record<Lang, Translations> = { ja, en }
 interface LangContextType {
   lang: Lang
   t: Translations
+  errorCatalog: Record<ErrorCode, ErrorCopy>
   setLang: (lang: Lang) => void
 }
 
 export const LangContext = createContext<LangContextType>({
   lang: 'ja',
   t: ja,
+  errorCatalog: getErrorCatalog('ja'),
   setLang: () => {},
 })
 
@@ -35,9 +39,10 @@ export function useLangState(): LangContextType {
     return (saved === 'en' || saved === 'ja') ? saved : 'ja'
   })
   const t = translations[lang]
+  const errorCatalog = getErrorCatalog(lang)
   const setLang = (l: Lang) => {
     setLangState(l)
     localStorage.setItem('xolvien-lang', l)
   }
-  return { lang, t, setLang }
+  return { lang, t, errorCatalog, setLang }
 }

@@ -4,6 +4,7 @@ import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
 import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, resetWorkspace, generateTestCasesStream, generateIntegrationTestCasesStream, generateE2ETestCasesStream, runUnitTestsStream, runIntegrationTestsStream, runE2ETestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
 import type { TestCaseItem } from '../types'
 import { useLang } from '../i18n'
+import { classifyError, type ErrorCode } from '../errors'
 
 type ChatEntry =
   | { type: 'user_instruction'; content: string }
@@ -23,7 +24,7 @@ type ChatEntry =
   | { type: 'test_running'; label: string }
   | { type: 'test_done'; summary: string; passed: boolean; items: TestCaseItem[] }
   | { type: 'review'; prompt: string; items: TestCaseItem[]; resolved: boolean }
-  | { type: 'error'; message: string }
+  | { type: 'error'; code: ErrorCode }
   | { type: 'info'; message: string }
 
 type StepId = 'implement' | 'unit_test' | 'integration_test' | 'e2e_test' | 'review'
@@ -123,7 +124,7 @@ export default function TaskDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const taskId = Number(id)
-  const { t, lang, setLang } = useLang()
+  const { t, lang, setLang, errorCatalog } = useLang()
 
   function getStatusLabel(status: TaskStatus): string {
     switch (status) {
@@ -165,6 +166,9 @@ export default function TaskDetail() {
 
   const [task, setTask] = useState<Task | null>(null)
   const [taskError, setTaskError] = useState<string | null>(null)
+  // Active (unresolved) execution error — surfaced as a prominent banner in the
+  // right pane. All action buttons stay disabled until the user dismisses it.
+  const [activeError, setActiveError] = useState<ErrorCode | null>(null)
   const [logEntries, setLogEntries] = useState<LogEntry[]>([])
   const [instruction, setInstruction] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -177,8 +181,8 @@ export default function TaskDetail() {
   const [generatingTestCases, setGeneratingTestCases] = useState(false)
   const [tcGenLabel, setTcGenLabel] = useState<string | null>(null)
   const [runningTests, setRunningTests] = useState(false)
-  const [runningTestType, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
-  const [testPhaseLabel, setTestPhaseLabel] = useState<string | null>(null)
+  const [, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
+  const [, setTestPhaseLabel] = useState<string | null>(null)
   const testCountRef = useRef({ passed: 0, failed: 0 })
   const genCodeProgressRef = useRef({ done: 0, total: 0, startMs: 0 })
   const setTestResultSummary = (_v: string | null) => { /* stored in chatEntries */ }
@@ -194,6 +198,30 @@ export default function TaskDetail() {
   const [chatEntries, setChatEntries] = useState<ChatEntry[]>([])
   const streamingEntryIndexRef = useRef<number>(-1)
   const chatEndRef = useRef<HTMLDivElement>(null)
+
+  // Surface an execution error by cause-based code: raise the prominent banner
+  // (which gates all action buttons) and append a code-keyed entry to the chat
+  // history. The raw technical `detail` is pushed to the left log pane ONLY — it
+  // is never shown in the banner or chat (the user sees friendly copy by code).
+  // Push the raw technical detail to the left log pane only (never the banner).
+  const logErrorDetail = useCallback((detail?: string) => {
+    if (!detail) return
+    const fakeLog: TaskLog = {
+      id: Date.now(),
+      task_id: taskId,
+      level: 'error',
+      source: 'system',
+      message: detail,
+      created_at: new Date().toISOString(),
+    }
+    setLogEntries(prev => [...prev, { kind: 'log', data: fakeLog }])
+  }, [taskId])
+
+  const raiseError = useCallback((code: ErrorCode, detail?: string) => {
+    setActiveError(code)
+    setChatEntries(prev => [...prev, { type: 'error', code }])
+    logErrorDetail(detail)
+  }, [logErrorDetail])
 
   // Resume / step navigation state
   const [resumeChecked, setResumeChecked] = useState(false)
@@ -381,10 +409,16 @@ export default function TaskDetail() {
         else if (hasImpl) setSelectedStep('unit_test')
 
       } catch (err) {
-        setChatEntries([{
-          type: 'error',
-          message: `${t.sessionRestoreError}${err instanceof Error ? err.message : String(err)}`,
-        }])
+        const detail = err instanceof Error ? err.message : String(err)
+        const status = (err as { response?: { status?: number } })?.response?.status ?? 0
+        const code = classifyError(status, detail)
+        setActiveError(code)
+        setChatEntries([{ type: 'error', code }])
+        const fakeLog: TaskLog = {
+          id: Date.now(), task_id: taskId, level: 'error', source: 'system',
+          message: detail, created_at: new Date().toISOString(),
+        }
+        setLogEntries(prev => [...prev, { kind: 'log', data: fakeLog }])
       }
     }
 
@@ -506,7 +540,8 @@ export default function TaskDetail() {
     try {
       await resetWorkspace(taskId)
     } catch (err) {
-      setChatEntries(prev => [...prev, { type: 'error', message: `Reset failed: ${err instanceof Error ? err.message : String(err)}` }])
+      const detail = err instanceof Error ? err.message : String(err)
+      raiseError(classifyError(0, detail), detail)
       return
     }
     // Restore to the same initial state as a new task
@@ -573,11 +608,13 @@ export default function TaskDetail() {
           ))
         }
       },
-      (err) => {
+      (code, detail) => {
         setClarifying(false)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.clarifyError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -641,11 +678,13 @@ export default function TaskDetail() {
           ))
         }
       },
-      (err) => {
+      (code, detail) => {
         setClarifying(false)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.clarifyError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -711,11 +750,13 @@ export default function TaskDetail() {
             : e
         ))
       },
-      (err) => {
+      (code, detail) => {
         setGenerating(false)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.promptGenError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -771,11 +812,13 @@ export default function TaskDetail() {
             : e
         ))
       },
-      (err) => {
+      (code, detail) => {
         setGenerating(false)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.regenerateError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -819,13 +862,15 @@ export default function TaskDetail() {
 
         setSelectedStep('unit_test')
       },
-      (err) => {
+      (code, detail) => {
         setStreaming(false)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => {
           const idx = [...prev].reverse().findIndex(e => e.type === 'implementation_running')
-          if (idx === -1) return [...prev, { type: 'error', message: `${t.implError}${err}` }]
+          if (idx === -1) return [...prev, { type: 'error', code }]
           const realIdx = prev.length - 1 - idx
-          return prev.map((e, i) => i === realIdx ? { type: 'error', message: `${t.implError}${err}` } : e)
+          return prev.map((e, i) => i === realIdx ? { type: 'error', code } : e)
         })
       }
     )
@@ -937,13 +982,15 @@ export default function TaskDetail() {
           }
         } catch { /* ignore */ }
       },
-      (err) => {
+      (code, detail) => {
         setRunningTests(false)
         setRunningTestType(null)
         setTestPhaseLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'test_running'
-            ? { type: 'error', message: `${t.testRunError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1057,13 +1104,15 @@ export default function TaskDetail() {
           }
         } catch { /* ignore */ }
       },
-      (err) => {
+      (code, detail) => {
         setRunningTests(false)
         setRunningTestType(null)
         setTestPhaseLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'test_running'
-            ? { type: 'error', message: `${t.integrationTestRunError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1111,20 +1160,26 @@ export default function TaskDetail() {
               ? { type: 'test_cases_ready', items, approved: false }
               : e
           ))
-        } catch {
-          setChatEntries(prev => prev.map((e, i) =>
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e)
+          const fetchCode = classifyError(0, detail)
+          setActiveError(fetchCode)
+          logErrorDetail(detail)
+          setChatEntries(prev => prev.map((en, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'error', message: t.testCaseFetchError }
-              : e
+              ? { type: 'error', code: fetchCode }
+              : en
           ))
         }
       },
-      (err) => {
+      (code, detail) => {
         setGeneratingTestCases(false)
         setTcGenLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.testCaseGenError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1172,20 +1227,26 @@ export default function TaskDetail() {
               ? { type: 'integration_test_cases_ready', items, approved: false }
               : e
           ))
-        } catch {
-          setChatEntries(prev => prev.map((e, i) =>
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e)
+          const fetchCode = classifyError(0, detail)
+          setActiveError(fetchCode)
+          logErrorDetail(detail)
+          setChatEntries(prev => prev.map((en, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'error', message: t.integrationTCFetchError }
-              : e
+              ? { type: 'error', code: fetchCode }
+              : en
           ))
         }
       },
-      (err) => {
+      (code, detail) => {
         setGeneratingTestCases(false)
         setTcGenLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.integrationTCGenError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1299,13 +1360,15 @@ export default function TaskDetail() {
           }
         } catch { /* ignore */ }
       },
-      (err) => {
+      (code, detail) => {
         setRunningTests(false)
         setRunningTestType(null)
         setTestPhaseLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'test_running'
-            ? { type: 'error', message: `${t.e2eTestRunError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1353,20 +1416,26 @@ export default function TaskDetail() {
               ? { type: 'e2e_test_cases_ready', items, approved: false }
               : e
           ))
-        } catch {
-          setChatEntries(prev => prev.map((e, i) =>
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e)
+          const fetchCode = classifyError(0, detail)
+          setActiveError(fetchCode)
+          logErrorDetail(detail)
+          setChatEntries(prev => prev.map((en, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'error', message: t.e2eTCFetchError }
-              : e
+              ? { type: 'error', code: fetchCode }
+              : en
           ))
         }
       },
-      (err) => {
+      (code, detail) => {
         setGeneratingTestCases(false)
         setTcGenLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.e2eTCGenError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1437,20 +1506,26 @@ export default function TaskDetail() {
               ? { type: 'test_cases_ready', items, approved: false }
               : e
           ))
-        } catch {
-          setChatEntries(prev => prev.map((e, i) =>
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e)
+          const fetchCode = classifyError(0, detail)
+          setActiveError(fetchCode)
+          logErrorDetail(detail)
+          setChatEntries(prev => prev.map((en, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'error', message: t.testCaseFetchError }
-              : e
+              ? { type: 'error', code: fetchCode }
+              : en
           ))
         }
       },
-      (err) => {
+      (code, detail) => {
         setGeneratingTestCases(false)
         setTcGenLabel(null)
+        setActiveError(code)
+        logErrorDetail(detail)
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
-            ? { type: 'error', message: `${t.testCaseRevisionError}${err}` }
+            ? { type: 'error', code }
             : e
         ))
       },
@@ -1483,21 +1558,8 @@ export default function TaskDetail() {
         )
       },
       () => { setPushing(false) },
-      (err) => {
-        setLogEntries(prev => [
-          ...prev,
-          {
-            kind: 'log',
-            data: {
-              id: Date.now(),
-              task_id: taskId,
-              level: 'error',
-              source: 'system',
-              message: `Git push error: ${err}`,
-              created_at: new Date().toISOString(),
-            },
-          },
-        ])
+      (code, detail) => {
+        raiseError(code, detail)
         setPushing(false)
       }
     )
@@ -1509,6 +1571,8 @@ export default function TaskDetail() {
     try {
       const updated = await stopTask(task.id)
       setTask(updated)
+      // Stopping is a recovery action — clear any active error banner.
+      setActiveError(null)
     } catch (err) {
       alert(err instanceof Error ? err.message : t.stopFailed)
     } finally {
@@ -1892,15 +1956,17 @@ export default function TaskDetail() {
           </div>
         )
 
-      case 'error':
+      case 'error': {
+        const copy = errorCatalog[entry.code]
         return (
           <div key={idx} style={{
             background: '#450a0a', border: '1px solid #dc2626', borderRadius: '6px',
             padding: '8px 12px', fontSize: '0.82rem', color: '#fca5a5',
           }}>
-            ❌ {entry.message}
+            ❌ {copy.title}
           </div>
         )
+      }
 
       case 'info':
         return (
@@ -1918,7 +1984,8 @@ export default function TaskDetail() {
   }
 
   function renderActionButtons() {
-    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
+    // An unresolved error disables every action button until the user dismisses it.
+    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests || !!activeError
 
     // Determine current context from chatEntries
     const lastUnconfirmedPrompt = chatEntries.reduce<(ChatEntry & { type: 'prompt_generated' }) | null>(
@@ -2217,7 +2284,8 @@ export default function TaskDetail() {
   }
 
   function renderInputArea() {
-    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests
+    // An unresolved error blocks sending until the user dismisses it.
+    const isBusy = streaming || generating || clarifying || generatingTestCases || runningTests || !!activeError
 
     // Determine phase from chatEntries
     const lastEntry = chatEntries.length > 0 ? chatEntries[chatEntries.length - 1] : null
@@ -2546,7 +2614,7 @@ export default function TaskDetail() {
           <button
             className="btn-secondary btn-sm"
             onClick={handleGitPush}
-            disabled={pushing || streaming || task.status !== 'idle'}
+            disabled={pushing || streaming || task.status !== 'idle' || !!activeError}
             style={{ flexShrink: 0 }}
           >
             {pushing ? t.pushing : t.gitPush}
@@ -2682,6 +2750,67 @@ export default function TaskDetail() {
                 )
               })}
             </div>
+
+            {/* Active error banner — prominent, fixed above the chat viewport.
+                Appears immediately when an error occurs and blocks all actions
+                until dismissed. Shows friendly copy (title + cause + recovery
+                actions) looked up by error code; the raw technical detail is in
+                the left log pane only, never here. */}
+            {activeError && (() => {
+              const copy = errorCatalog[activeError]
+              return (
+                <div
+                  role="alert"
+                  style={{
+                    flexShrink: 0,
+                    background: '#dc2626',
+                    borderTop: '3px solid #fca5a5',
+                    borderBottom: '3px solid #fca5a5',
+                    color: '#fff',
+                    padding: '14px 16px',
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '12px',
+                  }}
+                >
+                  <span style={{ fontSize: '1.4rem', lineHeight: 1, flexShrink: 0 }}>⛔</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '4px' }}>
+                      {copy.title}
+                    </div>
+                    <div style={{ fontSize: '0.84rem', marginBottom: copy.actions.length ? '8px' : 0, opacity: 0.95 }}>
+                      {copy.cause}
+                    </div>
+                    {copy.actions.length > 0 && (
+                      <>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '2px' }}>
+                          {t.errorBannerActionsLabel}
+                        </div>
+                        <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.83rem', lineHeight: 1.5 }}>
+                          {copy.actions.map((a, i) => <li key={i}>{a}</li>)}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setActiveError(null)}
+                    style={{
+                      flexShrink: 0,
+                      background: '#fff',
+                      color: '#dc2626',
+                      border: 'none',
+                      borderRadius: '4px',
+                      padding: '4px 12px',
+                      fontSize: '0.82rem',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t.errorBannerDismiss}
+                  </button>
+                </div>
+              )
+            })()}
 
             {/* Chat history viewport */}
             <div style={{

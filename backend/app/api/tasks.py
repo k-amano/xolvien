@@ -14,6 +14,7 @@ from app.schemas.task import TaskCreate, TaskResponse, TaskListResponse, TaskUpd
 from app.api.auth import verify_token
 from app.api.repositories import get_or_create_default_user
 from app.services.docker_service import get_docker_service
+from app.errors import XolvienError, classify_exception, error_sentinel_line
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
@@ -260,12 +261,20 @@ async def git_push(
 
     async def stream():
         yield f"[GIT] ブランチ '{task.branch_name}' を push しています...\n"
-        async for chunk in docker_service.execute_command_stream(
-            task.container_id,
-            f"git push -u origin {task.branch_name} 2>&1",
-            "/workspace/repo",
-        ):
-            yield chunk
+        try:
+            async for chunk in docker_service.execute_command_stream(
+                task.container_id,
+                f"git push -u origin {task.branch_name} 2>&1",
+                "/workspace/repo",
+            ):
+                yield chunk
+        except Exception as e:
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield error_sentinel_line(code, str(e))
+            return
+        # Note: git auth/reject failures surface as non-zero exit text inside the
+        # streamed chunks (HTTP status is already 200), so they are classified
+        # client-side from the accumulated stream text — not via this sentinel.
         yield "\n[GIT] push 完了\n"
 
     return StreamingResponse(stream(), media_type="text/plain")

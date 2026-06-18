@@ -1,7 +1,74 @@
 import axios from 'axios'
 import type { Repository, Task, TaskLog, TestRun, Instruction, TestCaseItem } from '../types'
+import { classifyError, extractSentinel, codeFromBody, type ErrorCode } from '../errors'
 
 const AUTH_TOKEN = 'dev-token-12345'
+
+// Error callback used by every streaming endpoint. The code drives the user-
+// facing banner (via i18n errorCatalog); detail is for the log pane only.
+export type StreamErrorCb = (code: ErrorCode, detail: string) => void
+
+/**
+ * Drive a streaming fetch Response: forward chunks, then resolve the terminal
+ * outcome. A `[[XOLVIEN_ERROR:CODE]]` sentinel (emitted by the backend when a
+ * stream aborts) is stripped from the displayed text and routed to onError.
+ * When `classifyDoneText` is set (git push), the accumulated text is scanned on
+ * success for in-stream failures (auth/reject) that arrive with HTTP 200.
+ */
+async function pumpStream(
+  response: Response,
+  onChunk: (text: string) => void,
+  onDone: () => void,
+  onError: StreamErrorCb,
+  opts: { classifyDoneText?: boolean } = {}
+): Promise<void> {
+  if (!response.ok) {
+    const text = await response.text()
+    onError(codeFromBody(text) ?? classifyError(response.status, text), text)
+    return
+  }
+  if (!response.body) {
+    onError('UNKNOWN', 'No response body')
+    return
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let accumulated = ''
+  let pendingTail = '' // hold back a possible partial sentinel split across reads
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const chunk = decoder.decode(value, { stream: true })
+    if (!chunk) continue
+    accumulated += chunk
+    // Emit everything except a trailing fragment that might be a partial
+    // sentinel line; the sentinel only ever appears as the final line.
+    const combined = pendingTail + chunk
+    const lastNl = combined.lastIndexOf('\n')
+    if (lastNl === -1) {
+      pendingTail = combined
+    } else {
+      const emit = combined.slice(0, lastNl + 1)
+      pendingTail = combined.slice(lastNl + 1)
+      const { code, cleaned } = extractSentinel(emit)
+      if (code) { onChunk(cleaned); onError(code, accumulated); return }
+      if (cleaned) onChunk(cleaned)
+    }
+  }
+
+  // Flush any held-back tail and check it (and the full text) for a sentinel.
+  const tail = extractSentinel(pendingTail)
+  if (tail.code) { if (tail.cleaned) onChunk(tail.cleaned); onError(tail.code, accumulated); return }
+  if (pendingTail) onChunk(pendingTail)
+
+  if (opts.classifyDoneText) {
+    const code = classifyError(200, accumulated)
+    if (code !== 'UNKNOWN') { onError(code, accumulated); return }
+  }
+  onDone()
+}
 
 const apiClient = axios.create({
   baseURL: '/',
@@ -78,36 +145,19 @@ export async function gitPushStream(
   taskId: number,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void
+  onError: StreamErrorCb
 ): Promise<void> {
   try {
     const response = await fetch(`/api/v1/tasks/${taskId}/git/push`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
     })
-
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    // git auth/reject failures arrive as in-stream text with HTTP 200, so scan
+    // the accumulated output on completion.
+    await pumpStream(response, onChunk, onDone, onError, { classifyDoneText: true })
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -146,7 +196,7 @@ export async function clarifyStream(
   history: { role: 'assistant' | 'user'; content: string }[],
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -162,28 +212,10 @@ export async function clarifyStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -193,7 +225,7 @@ export async function generatePromptStream(
   feedback: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -209,30 +241,10 @@ export async function generatePromptStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -241,7 +253,7 @@ export async function generateTestCasesStream(
   implementationPrompt: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -257,28 +269,10 @@ export async function generateTestCasesStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -287,7 +281,7 @@ export async function generateIntegrationTestCasesStream(
   implementationPrompt: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -303,28 +297,10 @@ export async function generateIntegrationTestCasesStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -333,7 +309,7 @@ export async function runUnitTestsStream(
   implementationPrompt: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -349,28 +325,10 @@ export async function runUnitTestsStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -379,7 +337,7 @@ export async function runIntegrationTestsStream(
   implementationPrompt: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -395,28 +353,10 @@ export async function runIntegrationTestsStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -425,7 +365,7 @@ export async function generateE2ETestCasesStream(
   implementationPrompt: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -441,28 +381,10 @@ export async function generateE2ETestCasesStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -471,7 +393,7 @@ export async function runE2ETestsStream(
   implementationPrompt: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void,
+  onError: StreamErrorCb,
   lang: string = 'ja'
 ): Promise<void> {
   try {
@@ -487,28 +409,10 @@ export async function runE2ETestsStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) onChunk(chunk)
-    }
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
 
@@ -517,7 +421,7 @@ export async function executeInstructionStream(
   content: string,
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void
+  onError: StreamErrorCb
 ): Promise<void> {
   try {
     const response = await fetch(
@@ -532,31 +436,9 @@ export async function executeInstructionStream(
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text()
-      onError(`HTTP ${response.status}: ${text}`)
-      return
-    }
-
-    if (!response.body) {
-      onError('No response body')
-      return
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      if (chunk) {
-        onChunk(chunk)
-      }
-    }
-
-    onDone()
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
-    onError(err instanceof Error ? err.message : String(err))
+    const msg = err instanceof Error ? err.message : String(err)
+    onError(classifyError(0, msg), msg)
   }
 }
