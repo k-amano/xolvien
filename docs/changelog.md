@@ -4,6 +4,12 @@
 
 ## 2026-06-22
 
+### React ErrorBoundary for unhandled render exceptions (Roadmap Sprint 1.3)
+
+- New `components/ErrorBoundary.tsx`: a class component catching render-time exceptions via `getDerivedStateFromError` / `componentDidCatch`. Shows a self-contained recovery screen (⛔, bilingual copy, **Reload** / **Home** buttons) instead of a blank page. The technical detail goes to the console only, never to the user. Kept context/i18n-free so it still renders if the surrounding tree is broken.
+- `main.tsx`: wraps the app (outermost, around `BrowserRouter`) so it catches everything.
+- Completes Sprint 1.3 (operational/API errors were already handled by the cause-based error banner; this covers render-time bugs).
+
 ### Always-available message sending with auto-send queue (Roadmap Sprint 1.2)
 
 The input textarea is no longer disabled while an operation is running, and
