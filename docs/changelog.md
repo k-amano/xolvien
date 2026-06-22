@@ -2,6 +2,26 @@
 
 ---
 
+## 2026-06-22
+
+### Always-available message sending with auto-send queue (Roadmap Sprint 1.2)
+
+The input textarea is no longer disabled while an operation is running, and
+messages typed during processing are queued and auto-sent when the app is idle.
+
+**Frontend `pages/TaskDetail.tsx`:**
+- Added `pendingMessages` (FIFO queue) state + `flushingQueueRef` re-entrancy guard.
+- `isInputBusy` derived from the operation flags (streaming / generating / clarifying / generatingTestCases / runningTests).
+- `sendOrQueue()`: sends immediately when idle, otherwise enqueues. `dispatchTextSend()` routes a queued message to the correct action for the phase at send time (clarify answer if the last entry is a `clarify_question`, otherwise a new/modify instruction). Confirm/approve actions stay button-only and are never queued.
+- A `useEffect` flushes the queue one message at a time: when `isInputBusy` clears (and no active error / container idle), it dequeues the oldest message and dispatches it; the guard + the busy-flag toggle drive the next iteration.
+- Textarea `disabled` now only true for a missing/initializing container; `canSend` no longer blocks on busy. Queued messages render as a removable, numbered list above the input. Send button label switches to "Queue" while busy.
+- Test/review steps also expose a send button when free text is present, so input is available in every phase.
+- Removed the now-unused `handleSendClarifyAnswer` (superseded by `sendOrQueue`).
+
+**Frontend `i18n/en.ts` / `ja.ts`:** added `queueAndSend`, `queuedLabel(n)`, `queuedRemove`.
+
+---
+
 ## 2026-06-18
 
 ### Cause-based error display + unified exception handling (Roadmap Sprint 1.1 + 1.3)
