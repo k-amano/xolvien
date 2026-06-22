@@ -171,6 +171,10 @@ export default function TaskDetail() {
   const [activeError, setActiveError] = useState<ErrorCode | null>(null)
   const [logEntries, setLogEntries] = useState<LogEntry[]>([])
   const [instruction, setInstruction] = useState('')
+  // Messages typed while a previous operation is still running. They are queued
+  // (FIFO) and auto-sent one at a time as soon as the app is idle again.
+  const [pendingMessages, setPendingMessages] = useState<string[]>([])
+  const flushingQueueRef = useRef(false)
   const [streaming, setStreaming] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [pushing, setPushing] = useState(false)
@@ -692,12 +696,52 @@ export default function TaskDetail() {
     )
   }
 
-  async function handleSendClarifyAnswer() {
-    if (!instruction.trim() || clarifying) return
-    const userMsg = instruction.trim()
-    setInstruction('')
-    await submitClarifyAnswer(userMsg)
+  // True while any operation that consumes the input is in flight.
+  const isInputBusy = streaming || generating || clarifying || generatingTestCases || runningTests
+
+  // Route a free-text message to the right action for the current phase:
+  // a clarify answer if we're mid-clarify, otherwise a (new/modify) instruction.
+  // Confirm/approve actions are button-only and never queued.
+  async function dispatchTextSend(msg: string) {
+    const text = msg.trim()
+    if (!text) return
+    const lastEntry = chatEntries.length > 0 ? chatEntries[chatEntries.length - 1] : null
+    if (lastEntry?.type === 'clarify_question') {
+      await submitClarifyAnswer(text)
+    } else {
+      await handleStartClarify(text)
+    }
   }
+
+  // Send now if idle, otherwise enqueue for auto-send when the app goes idle.
+  function sendOrQueue() {
+    const text = instruction.trim()
+    if (!text || activeError) return
+    setInstruction('')
+    if (isInputBusy || task?.status !== 'idle') {
+      setPendingMessages(prev => [...prev, text])
+    } else {
+      void dispatchTextSend(text)
+    }
+  }
+
+  function removePendingMessage(idx: number) {
+    setPendingMessages(prev => prev.filter((_, i) => i !== idx))
+  }
+
+  // Auto-flush the queue: when the app becomes idle (and no blocking error),
+  // dispatch the oldest queued message. Re-runs as each send completes.
+  useEffect(() => {
+    if (isInputBusy || task?.status !== 'idle' || activeError) return
+    if (pendingMessages.length === 0 || flushingQueueRef.current) return
+    flushingQueueRef.current = true
+    const [next, ...rest] = pendingMessages
+    setPendingMessages(rest)
+    Promise.resolve(dispatchTextSend(next)).finally(() => {
+      flushingQueueRef.current = false
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInputBusy, task?.status, activeError, pendingMessages])
 
   async function handleSkipClarify() {
     const originalInstruction = instruction.trim()
@@ -2300,26 +2344,31 @@ export default function TaskDetail() {
     const isTestOrReviewStep = selectedStep === 'unit_test' || selectedStep === 'integration_test' ||
       selectedStep === 'e2e_test' || selectedStep === 'review'
 
-    const canSend = !isBusy && instruction.trim().length > 0 && task?.status === 'idle'
+    // Input is always available while the container is up; sending while busy
+    // enqueues the message (auto-sent when idle). It is only blocked by an
+    // unresolved error or a non-running container.
+    const canSend = !activeError && instruction.trim().length > 0 &&
+      task?.status !== 'pending' && task?.status !== 'initializing'
 
     // Placeholder changes by phase
     let placeholder = t.inputPlaceholder
     if (isInitialPhase) placeholder = t.inputPlaceholder
     else if (isClarifyMode) placeholder = t.inputPlaceholderClarify
     else if (isPromptPhase) placeholder = t.feedbackPlaceholder
-    else if (isTestOrReviewStep) placeholder = t.inputDisabledPlaceholder
+    else if (isTestOrReviewStep) placeholder = t.inputPlaceholder
 
-    const textareaDisabled = isBusy || task?.status !== 'idle' ||
-      (isTestOrReviewStep && !isPromptPhase)
-    const isDisabledNoInput = isTestOrReviewStep && !isPromptPhase
+    // Textarea stays enabled even while busy so the user can prepare the next
+    // message; only a missing/initializing container disables it.
+    const textareaDisabled = task?.status === 'pending' || task?.status === 'initializing'
+    const isDisabledNoInput = false
 
     // Buttons for each phase (isClarifyMode / isPromptPhase take priority over isInitialPhase)
     let buttons: React.ReactNode = null
     if (isClarifyMode) {
       buttons = (
         <>
-          <button className="btn-primary" onClick={handleSendClarifyAnswer} disabled={!canSend}>
-            {t.sendAnswer}
+          <button className="btn-primary" onClick={sendOrQueue} disabled={!canSend}>
+            {isInputBusy ? t.queueAndSend : t.sendAnswer}
           </button>
           <button className="btn-secondary" onClick={handleSkipClarify} disabled={isBusy}>
             {t.skipAndGenerate}
@@ -2340,20 +2389,31 @@ export default function TaskDetail() {
     } else if (isInitialPhase) {
       buttons = confirmedPrompt ? (
         <>
-          <button className="btn-primary" onClick={() => handleStartClarify()} disabled={!canSend}>
-            {t.modify}
+          <button className="btn-primary" onClick={sendOrQueue} disabled={!canSend}>
+            {isInputBusy ? t.queueAndSend : t.modify}
           </button>
           <button className="btn-danger" onClick={handleResetAndRebuild} disabled={isBusy || task?.status !== 'idle'}>
             {t.resetAndRebuild}
           </button>
         </>
       ) : (
-        <button className="btn-primary" onClick={() => handleStartClarify()} disabled={!canSend}>
-          {t.sendInstruction}
+        <button className="btn-primary" onClick={sendOrQueue} disabled={!canSend}>
+          {isInputBusy ? t.queueAndSend : t.sendInstruction}
         </button>
       )
     } else {
-      buttons = renderActionButtons()
+      // Test/review steps: keep the step-specific action buttons, but also allow
+      // sending a free-text instruction (queued while busy) when the user types.
+      buttons = (
+        <>
+          {instruction.trim().length > 0 && (
+            <button className="btn-primary" onClick={sendOrQueue} disabled={!canSend}>
+              {isInputBusy ? t.queueAndSend : t.sendInstruction}
+            </button>
+          )}
+          {renderActionButtons()}
+        </>
+      )
     }
 
     const displayValue = isDisabledNoInput ? '' : instruction
@@ -2366,6 +2426,38 @@ export default function TaskDetail() {
         flexDirection: 'column',
         background: '#0d1117',
       }}>
+        {/* Queued messages — typed while busy, auto-sent when idle (FIFO) */}
+        {pendingMessages.length > 0 && (
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: '4px',
+            padding: '8px 12px', borderBottom: '1px solid #21262d', background: '#10182b',
+          }}>
+            <span style={{ fontSize: '0.72rem', color: '#8b949e', fontWeight: 600 }}>
+              {t.queuedLabel(pendingMessages.length)}
+            </span>
+            {pendingMessages.map((m, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                fontSize: '0.8rem', color: '#c9d1d9', background: '#0d1117',
+                border: '1px solid #21262d', borderRadius: '4px', padding: '4px 8px',
+              }}>
+                <span style={{ color: '#6e7681', flexShrink: 0 }}>{i + 1}.</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m}</span>
+                <button
+                  onClick={() => removePendingMessage(i)}
+                  title={t.queuedRemove}
+                  style={{
+                    flexShrink: 0, background: 'none', border: 'none', color: '#8b949e',
+                    cursor: 'pointer', fontSize: '0.95rem', lineHeight: 1, padding: '0 2px',
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Tab bar + toolbar */}
         <div style={{
           display: 'flex',
