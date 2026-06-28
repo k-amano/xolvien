@@ -9,6 +9,49 @@ const AUTH_TOKEN = 'dev-token-12345'
 export type StreamErrorCb = (code: ErrorCode, detail: string) => void
 
 /**
+ * Router for the RAW stream-json the backend now streams.
+ *
+ * The LEFT pane is a console.log-equivalent raw view: callers append `raw`
+ * verbatim. The RIGHT pane needs the assistant's plain text (clarify question /
+ * PROMPT_READY / generated prompt), so this reconstructs it by concatenating
+ * `text_delta` events across chunks. Partial JSON lines split across reads are
+ * buffered. Unknown line types (keepalive, ping, system, result) are ignored
+ * for reconstruction but still flow to the left pane as `raw`.
+ */
+export function createStreamJsonRouter() {
+  let lineCarry = ''
+  let assistantText = ''
+
+  return {
+    /** Feed one raw chunk. Returns the verbatim raw text (for the left pane). */
+    push(rawChunk: string): { raw: string } {
+      const combined = lineCarry + rawChunk
+      const parts = combined.split('\n')
+      lineCarry = parts.pop() ?? '' // last element is a (possibly partial) line
+      for (const line of parts) {
+        const s = line.trim()
+        if (!s) continue
+        let obj: unknown
+        try { obj = JSON.parse(s) } catch { continue }
+        const o = obj as Record<string, unknown>
+        if (o.type === 'stream_event') {
+          const ev = (o.event ?? {}) as Record<string, unknown>
+          if (ev.type === 'content_block_delta') {
+            const delta = (ev.delta ?? {}) as Record<string, unknown>
+            if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+              assistantText += delta.text
+            }
+          }
+        }
+      }
+      return { raw: rawChunk }
+    },
+    /** The reconstructed assistant text so far (for the right pane). */
+    text(): string { return assistantText },
+  }
+}
+
+/**
  * Drive a streaming fetch Response: forward chunks, then resolve the terminal
  * outcome. A `[[XOLVIEN_ERROR:CODE]]` sentinel (emitted by the backend when a
  * stream aborts) is stripped from the displayed text and routed to onError.
@@ -35,7 +78,21 @@ async function pumpStream(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let accumulated = ''
-  let pendingTail = '' // hold back a possible partial sentinel split across reads
+  // Minimal carry: only a trailing fragment that could be the *start* of a
+  // sentinel marker is held back. Everything else is forwarded IMMEDIATELY so
+  // the left pane streams in real time (Thinking / Tool / Result / text deltas).
+  let carry = ''
+  const MARKER = '[[XOLVIEN_ERROR:'
+
+  // Length of the longest suffix of `s` that is a prefix of MARKER — i.e. how
+  // much of a possibly-split marker we must hold back. 0 when none.
+  const partialMarkerLen = (s: string): number => {
+    const max = Math.min(s.length, MARKER.length - 1)
+    for (let n = max; n > 0; n--) {
+      if (MARKER.startsWith(s.slice(s.length - n))) return n
+    }
+    return 0
+  }
 
   while (true) {
     const { done, value } = await reader.read()
@@ -43,25 +100,34 @@ async function pumpStream(
     const chunk = decoder.decode(value, { stream: true })
     if (!chunk) continue
     accumulated += chunk
-    // Emit everything except a trailing fragment that might be a partial
-    // sentinel line; the sentinel only ever appears as the final line.
-    const combined = pendingTail + chunk
-    const lastNl = combined.lastIndexOf('\n')
-    if (lastNl === -1) {
-      pendingTail = combined
-    } else {
-      const emit = combined.slice(0, lastNl + 1)
-      pendingTail = combined.slice(lastNl + 1)
-      const { code, cleaned } = extractSentinel(emit)
-      if (code) { onChunk(cleaned); onError(code, accumulated); return }
+
+    let buf = carry + chunk
+    carry = ''
+
+    // A complete sentinel present → emit the text before it, raise the error.
+    const { code, cleaned } = extractSentinel(buf)
+    if (code) {
       if (cleaned) onChunk(cleaned)
+      onError(code, accumulated)
+      return
     }
+
+    // No complete sentinel yet. Hold back only a trailing partial-marker
+    // fragment (so a marker split across reads isn't shown), emit the rest now.
+    const hold = partialMarkerLen(buf)
+    if (hold > 0) {
+      carry = buf.slice(buf.length - hold)
+      buf = buf.slice(0, buf.length - hold)
+    }
+    if (buf) onChunk(buf)
   }
 
-  // Flush any held-back tail and check it (and the full text) for a sentinel.
-  const tail = extractSentinel(pendingTail)
-  if (tail.code) { if (tail.cleaned) onChunk(tail.cleaned); onError(tail.code, accumulated); return }
-  if (pendingTail) onChunk(pendingTail)
+  // Stream ended. Flush whatever is left, checking once more for a sentinel.
+  if (carry) {
+    const tail = extractSentinel(carry)
+    if (tail.code) { if (tail.cleaned) onChunk(tail.cleaned); onError(tail.code, accumulated); return }
+    onChunk(carry)
+  }
 
   if (opts.classifyDoneText) {
     const code = classifyError(200, accumulated)

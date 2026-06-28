@@ -16,167 +16,107 @@ from app.models.test_case_item import TestCaseItem
 from app.models.test_case_result import TestCaseResult, Verdict
 from app.services.docker_service import get_docker_service
 
-# Python script for text-only generation (prompt generation)
-_RUNNER_SCRIPT = """\
-import subprocess, sys, os, pwd, threading, time
+# Unified RAW stream-json runner for ALL streamed Claude flows (clarify, prompt
+# generation, test code-gen, test auto-fix, execute).
+#
+# Design (see spec): the LEFT pane is a console.log-equivalent raw view. This
+# runner streams Claude Code CLI's stream-json output lines THROUGH UNMODIFIED —
+# no [Thinking]/[Tool:]/[Result] reformatting, no dummy keepalive text. The
+# frontend renders raw lines on the left and reconstructs assistant text for the
+# right pane by concatenating text_delta events.
+#
+# Per-flow auth/permission differences are read from a flags file written next to
+# the prompt: /tmp/xolvien_runner_flags.json -> {"skip_permissions", "drop_privs"}
+#   - clarify: drop_privs=False (run as root, HOME=xolvien for credentials),
+#     skip_permissions=False (read-only, no tools).
+#   - prompt/execute/test: drop_privs=True + skip_permissions=True (full tools).
+#
+# Silence handling: a JSON-shaped keepalive line {"type":"_xolvien_keepalive"} is
+# emitted every 15s so the stream never goes silent long enough to trip the
+# server-side chunk_timeout. It is valid JSON the frontend/back parsers ignore.
+#
+# Loop-detection: aborts after 5 consecutive identical tool_result texts (e.g. a
+# permission error repeating). The ORIGINAL raw line is still streamed.
+_RUNNER_SCRIPT_STREAM = """\
+import subprocess, sys, os, shutil, pwd, json, threading, time
+
 prompt = open('/tmp/xolvien_prompt.txt', encoding='utf-8').read()
 try:
+    flags = json.load(open('/tmp/xolvien_runner_flags.json'))
+except Exception:
+    flags = {}
+skip_permissions = bool(flags.get('skip_permissions', False))
+drop_privs_flag = bool(flags.get('drop_privs', False))
+
+try:
     pw = pwd.getpwnam('xolvien')
-    home = pw.pw_dir
+    uid, gid, home = pw.pw_uid, pw.pw_gid, pw.pw_dir
 except KeyError:
+    uid = gid = None
     home = '/root'
-env = {**os.environ, 'HOME': home}
+
+# When dropping privileges, make the ssh keys readable by the xolvien user.
+if uid is not None and drop_privs_flag:
+    src, dst = '/root/.ssh', f'{home}/.ssh'
+    if os.path.exists(src) and not os.path.exists(dst):
+        shutil.copytree(src, dst, symlinks=True)
+        for dirpath, dirs, files in os.walk(dst):
+            os.chown(dirpath, uid, gid)
+            for f in files:
+                try:
+                    os.chown(os.path.join(dirpath, f), uid, gid)
+                except Exception:
+                    pass
+
+cmd = ['claude']
+if skip_permissions:
+    cmd.append('--dangerously-skip-permissions')
+cmd += ['-p', prompt, '--output-format', 'stream-json',
+        '--include-partial-messages', '--verbose']
+
+# HOME points at the xolvien home (where the credentials file lives) whether we
+# run as root or drop to the xolvien user.
+env = {**os.environ, 'HOME': home if uid is not None else '/root'}
+
+preexec = None
+if uid is not None and drop_privs_flag:
+    def drop_privs():
+        os.setgroups([gid])
+        os.setgid(gid)
+        os.setuid(uid)
+    preexec = drop_privs
+
 proc = subprocess.Popen(
-    ['claude', '-p', prompt, '--output-format', 'text'],
+    cmd,
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     env=env,
+    cwd='/workspace/repo',
+    preexec_fn=preexec,
 )
+
+_write_lock = threading.Lock()
+
+def emit_raw(b):
+    with _write_lock:
+        sys.stdout.buffer.write(b)
+        if not b.endswith(b'\\n'):
+            sys.stdout.buffer.write(b'\\n')
+        sys.stdout.buffer.flush()
+
+# Echo the full prompt sent to Claude as the first line, so the left pane (a
+# console.log-equivalent) shows the INPUT as well as the output.
+emit_raw(json.dumps({'type': '_xolvien_input', 'prompt': prompt}).encode('utf-8'))
+
+# JSON keepalive so the stream never goes silent (e.g. during a long tool call).
 def _keepalive():
     while proc.poll() is None:
-        time.sleep(3)
+        time.sleep(15)
         if proc.poll() is None:
-            sys.stdout.buffer.write(b'[Claude] ...\\n')
-            sys.stdout.buffer.flush()
+            emit_raw(b'{"type":"_xolvien_keepalive"}')
 threading.Thread(target=_keepalive, daemon=True).start()
-for chunk in iter(lambda: proc.stdout.read(512), b''):
-    sys.stdout.buffer.write(chunk)
-    sys.stdout.buffer.flush()
-proc.wait()
-sys.exit(proc.returncode)
-"""
 
-# Python script for agent mode execution (file read/write/bash tools enabled)
-# Drops privileges to non-root xolvien user so --dangerously-skip-permissions is allowed
-_RUNNER_SCRIPT_AGENT = """\
-import subprocess, sys, os, shutil, pwd
-
-prompt = open('/tmp/xolvien_prompt.txt', encoding='utf-8').read()
-
-try:
-    pw = pwd.getpwnam('xolvien')
-    uid, gid, home = pw.pw_uid, pw.pw_gid, pw.pw_dir
-except KeyError:
-    uid = gid = None
-    home = '/root'
-
-if uid is not None:
-    src, dst = '/root/.ssh', f'{home}/.ssh'
-    if os.path.exists(src) and not os.path.exists(dst):
-        shutil.copytree(src, dst, symlinks=True)
-        for dirpath, dirs, files in os.walk(dst):
-            os.chown(dirpath, uid, gid)
-            for f in files:
-                try:
-                    os.chown(os.path.join(dirpath, f), uid, gid)
-                except Exception:
-                    pass
-
-    def drop_privs():
-        os.setgroups([gid])
-        os.setgid(gid)
-        os.setuid(uid)
-
-    cmd = ['claude', '--dangerously-skip-permissions', '-p', prompt]
-    env = {**os.environ, 'HOME': home}
-    preexec = drop_privs
-else:
-    cmd = ['claude', '-p', prompt, '--output-format', 'text']
-    env = {**os.environ, 'HOME': '/root'}
-    preexec = None
-
-proc = subprocess.Popen(
-    cmd,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    env=env,
-    cwd='/workspace/repo',
-    preexec_fn=preexec,
-)
-
-import threading, time
-def _keepalive():
-    while proc.poll() is None:
-        time.sleep(3)
-        if proc.poll() is None:
-            sys.stdout.buffer.write(b'[Claude] ...\\n')
-            sys.stdout.buffer.flush()
-t = threading.Thread(target=_keepalive, daemon=True)
-t.start()
-
-for chunk in iter(lambda: proc.stdout.read(512), b''):
-    sys.stdout.buffer.write(chunk)
-    sys.stdout.buffer.flush()
-proc.wait()
-sys.exit(proc.returncode)
-"""
-
-# Python script for execute_instruction: uses stream-json to show real-time tool/thinking/text events.
-# Used only by execute_instruction() — other callers use _RUNNER_SCRIPT_AGENT (text output).
-_RUNNER_SCRIPT_EXECUTE = """\
-import subprocess, sys, os, shutil, pwd, json
-
-prompt = open('/tmp/xolvien_prompt.txt', encoding='utf-8').read()
-
-try:
-    pw = pwd.getpwnam('xolvien')
-    uid, gid, home = pw.pw_uid, pw.pw_gid, pw.pw_dir
-except KeyError:
-    uid = gid = None
-    home = '/root'
-
-if uid is not None:
-    src, dst = '/root/.ssh', f'{home}/.ssh'
-    if os.path.exists(src) and not os.path.exists(dst):
-        shutil.copytree(src, dst, symlinks=True)
-        for dirpath, dirs, files in os.walk(dst):
-            os.chown(dirpath, uid, gid)
-            for f in files:
-                try:
-                    os.chown(os.path.join(dirpath, f), uid, gid)
-                except Exception:
-                    pass
-
-    def drop_privs():
-        os.setgroups([gid])
-        os.setgid(gid)
-        os.setuid(uid)
-
-    cmd = [
-        'claude', '--dangerously-skip-permissions', '-p', prompt,
-        '--output-format', 'stream-json',
-        '--include-partial-messages', '--verbose',
-    ]
-    env = {**os.environ, 'HOME': home}
-    preexec = drop_privs
-else:
-    cmd = [
-        'claude', '-p', prompt,
-        '--output-format', 'stream-json',
-        '--include-partial-messages', '--verbose',
-    ]
-    env = {**os.environ, 'HOME': '/root'}
-    preexec = None
-
-proc = subprocess.Popen(
-    cmd,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    env=env,
-    cwd='/workspace/repo',
-    preexec_fn=preexec,
-)
-
-def emit(line):
-    sys.stdout.buffer.write((line + '\\n').encode('utf-8'))
-    sys.stdout.buffer.flush()
-
-_tool_name = {}
-_tool_input = {}
-_in_thinking = {}
-_thinking_buf = {}
-
-# Loop-detection: abort after 5 consecutive identical result lines (permission errors etc.)
+# Loop-detection: abort after 5 consecutive identical tool_result texts.
 _last_result = None
 _repeat_count = 0
 _MAX_REPEATS = 5
@@ -189,85 +129,27 @@ for chunk in iter(lambda: proc.stdout.read(256), b''):
     buf += chunk
     while b'\\n' in buf:
         raw_line, buf = buf.split(b'\\n', 1)
-        line_str = raw_line.decode('utf-8', errors='replace').strip()
-        if not line_str:
+        if not raw_line.strip():
             continue
+        # Stream the line through UNMODIFIED (raw view).
+        emit_raw(raw_line)
+        # Parse only to drive loop-detection; do not alter the output.
         try:
-            obj = json.loads(line_str)
+            obj = json.loads(raw_line.decode('utf-8', errors='replace'))
         except Exception:
-            emit(line_str)
             continue
-
-        t = obj.get('type', '')
-
-        if t == 'stream_event':
-            ev = obj.get('event', {})
-            ev_type = ev.get('type', '')
-
-            if ev_type == 'content_block_start':
-                idx = ev.get('index', 0)
-                block = ev.get('content_block', {})
-                btype = block.get('type', '')
-                if btype == 'thinking':
-                    _in_thinking[idx] = True
-                    _thinking_buf[idx] = ''
-                elif btype == 'tool_use':
-                    _tool_name[idx] = block.get('name', 'Tool')
-                    _tool_input[idx] = ''
-
-            elif ev_type == 'content_block_delta':
-                idx = ev.get('index', 0)
-                delta = ev.get('delta', {})
-                dtype = delta.get('type', '')
-                if dtype == 'thinking_delta':
-                    _thinking_buf[idx] = _thinking_buf.get(idx, '') + delta.get('thinking', '')
-                elif dtype == 'text_delta':
-                    text = delta.get('text', '')
-                    if text:
-                        emit(text)
-                elif dtype == 'input_json_delta':
-                    _tool_input[idx] = _tool_input.get(idx, '') + delta.get('partial_json', '')
-
-            elif ev_type == 'content_block_stop':
-                idx = ev.get('index', 0)
-                if idx in _in_thinking:
-                    thinking = _thinking_buf.get(idx, '').strip()
-                    if thinking:
-                        emit('[Thinking] ' + thinking.replace('\\n', ' '))
-                    del _in_thinking[idx]
-                    _thinking_buf.pop(idx, None)
-                elif idx in _tool_name:
-                    name = _tool_name.pop(idx)
-                    raw_input = _tool_input.pop(idx, '')
-                    try:
-                        inp = json.loads(raw_input) if raw_input.strip() else {}
-                    except Exception:
-                        inp = {}
-                    summary = ''
-                    for key in ('command', 'path', 'file_path', 'description', 'query', 'pattern'):
-                        if key in inp:
-                            summary = str(inp[key])[:120]
-                            break
-                    if not summary and inp:
-                        summary = str(next(iter(inp.values()), ''))[:120]
-                    emit(f'[Tool: {name}] {summary}' if summary else f'[Tool: {name}]')
-
-        elif t == 'user':
-            msg = obj.get('message', {})
-            for item in msg.get('content', []):
+        if obj.get('type') == 'user':
+            for item in obj.get('message', {}).get('content', []):
                 if item.get('type') == 'tool_result':
                     content = item.get('content', '')
                     result_text = ''
-                    if isinstance(content, str) and content.strip():
+                    if isinstance(content, str):
                         result_text = content.strip()[:300]
-                        emit('[Result] ' + result_text)
                     elif isinstance(content, list):
                         for c in content:
                             if c.get('type') == 'text' and c.get('text', '').strip():
                                 result_text = c['text'].strip()[:300]
-                                emit('[Result] ' + result_text)
                                 break
-                    # Loop-detection on tool results
                     if result_text:
                         if result_text == _last_result:
                             _repeat_count += 1
@@ -275,11 +157,13 @@ for chunk in iter(lambda: proc.stdout.read(256), b''):
                             _last_result = result_text
                             _repeat_count = 1
                         if _repeat_count >= _MAX_REPEATS:
-                            emit(f'[ERROR] Identical error repeated {_MAX_REPEATS} times — aborting to prevent infinite loop.')
+                            emit_raw(b'{"type":"_xolvien_error","message":"Identical error repeated 5 times - aborting to prevent infinite loop."}')
                             proc.kill()
                             _aborted = True
                             break
 
+if buf.strip():
+    emit_raw(buf)
 proc.wait()
 sys.exit(1 if _aborted else proc.returncode)
 """
@@ -379,6 +263,20 @@ class ClaudeCodeService:
             f"\""
         )
         self.docker_service.execute_command(container_id, cmd, "/workspace")
+
+    def _write_runner(self, container_id: str, *, skip_permissions: bool, drop_privs: bool) -> None:
+        """
+        Install the unified raw stream-json runner plus its auth flags file.
+
+        skip_permissions / drop_privs select the per-flow Claude invocation:
+          clarify        -> skip_permissions=False, drop_privs=False (root, no tools)
+          prompt/execute/test -> skip_permissions=True, drop_privs=True (full tools)
+        """
+        self._write_text_to_container(
+            container_id, "/tmp/xolvien_runner_flags.json",
+            json.dumps({"skip_permissions": skip_permissions, "drop_privs": drop_privs}),
+        )
+        self._write_text_to_container(container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_STREAM)
 
     async def _prepare_uploads(self, db: AsyncSession, task: Task, lang: str = "ja") -> str:
         """
@@ -591,7 +489,8 @@ README:
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", clarify_prompt)
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT)
+        # clarify is read-only Q&A: run as root (HOME=xolvien), no tools.
+        self._write_runner(task.container_id, skip_permissions=False, drop_privs=False)
 
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
@@ -736,7 +635,7 @@ README:
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", meta_prompt)
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_EXECUTE)
+        self._write_runner(task.container_id, skip_permissions=True, drop_privs=True)
 
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
@@ -806,9 +705,9 @@ README:
                 yield "[SYSTEM] Attached reference files made available at /workspace/uploads/\n\n"
                 prompt_text = f"{instruction_content}\n{uploads_section}"
 
-            # Write prompt and agent runner script into the container
+            # Write prompt and runner script into the container
             self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", prompt_text)
-            self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_EXECUTE)
+            self._write_runner(task.container_id, skip_permissions=True, drop_privs=True)
 
             yield "[Claude] Running Claude Code CLI...\n\n"
 
@@ -1702,10 +1601,15 @@ Notes:
 """
 
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", gen_prompt)
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
+        self._write_runner(task.container_id, skip_permissions=True, drop_privs=True)
 
         gen_start = datetime.utcnow()
         tc_done_count = 0
+        # The runner now streams RAW stream-json. The [XOLVIEN_TC_DONE] markers are
+        # part of Claude's assistant text, so reconstruct that text by concatenating
+        # text_delta events, then count completed (newline-terminated) marker lines.
+        assistant_text = ""
+        counted_markers = 0
 
         async for chunk in self.docker_service.execute_command_stream(
             task.container_id,
@@ -1714,23 +1618,37 @@ Notes:
             chunk_timeout=90.0,
         ):
             now = datetime.utcnow()
-            clean_lines = []
-            for line in chunk.splitlines(keepends=True):
-                stripped = line.strip()
-                if stripped.startswith("[XOLVIEN_TC_START]"):
-                    pass  # consumed, not forwarded to log
-                elif stripped.startswith("[XOLVIEN_TC_DONE]"):
-                    tc_done_count += 1
-                    elapsed_ms = int((now - gen_start).total_seconds() * 1000)
-                    remaining = total_tc - tc_done_count
-                    avg_ms = elapsed_ms // tc_done_count if tc_done_count else 0
-                    eta_ms = avg_ms * remaining
-                    yield f"[XOLVIEN_PROGRESS] {tc_done_count}/{total_tc} elapsed_ms={elapsed_ms} eta_ms={eta_ms}\n"
-                else:
-                    clean_lines.append(line)
-            clean_chunk = "".join(clean_lines)
-            if clean_chunk:
-                yield clean_chunk
+            # Forward the raw chunk verbatim for the left-pane (console.log) view.
+            yield chunk
+            # Reconstruct assistant text from this chunk's text_delta events.
+            for raw_line in chunk.splitlines():
+                s = raw_line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    continue
+                if obj.get("type") == "stream_event":
+                    ev = obj.get("event", {})
+                    if ev.get("type") == "content_block_delta":
+                        delta = ev.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            assistant_text += delta.get("text", "")
+            # Count newly-completed [XOLVIEN_TC_DONE] lines (only whole lines).
+            done_total = assistant_text.count("[XOLVIEN_TC_DONE]")
+            # Subtract a possibly-incomplete trailing marker on the last line.
+            last_line = assistant_text.rsplit("\n", 1)[-1]
+            if "[XOLVIEN_TC_DONE]" in last_line and not assistant_text.endswith("\n"):
+                done_total -= 1
+            while counted_markers < done_total:
+                counted_markers += 1
+                tc_done_count += 1
+                elapsed_ms = int((now - gen_start).total_seconds() * 1000)
+                remaining = total_tc - tc_done_count
+                avg_ms = elapsed_ms // tc_done_count if tc_done_count else 0
+                eta_ms = avg_ms * remaining
+                yield f"[XOLVIEN_PROGRESS] {tc_done_count}/{total_tc} elapsed_ms={elapsed_ms} eta_ms={eta_ms}\n"
 
         # Marker is mandatory — abort if Claude never output one
         if tc_done_count == 0:
@@ -1863,12 +1781,13 @@ Notes:
   Playwright の `browserContext.grantPermissions()` や `page.route()` でモックして正しく検証すること
 """
                 self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", fix_prompt)
-                self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_AGENT)
+                self._write_runner(task.container_id, skip_permissions=True, drop_privs=True)
 
                 async for chunk in self.docker_service.execute_command_stream(
                     task.container_id,
                     "python3 /tmp/xolvien_runner.py",
                     "/workspace/repo",
+                    chunk_timeout=120.0,
                 ):
                     yield chunk
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import type { Task, TaskLog, TaskStatus, LogLevel } from '../types'
-import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, resetWorkspace, generateTestCasesStream, generateIntegrationTestCasesStream, generateE2ETestCasesStream, runUnitTestsStream, runIntegrationTestsStream, runE2ETestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems } from '../services/api'
+import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStream, clarifyStream, gitPushStream, resetWorkspace, generateTestCasesStream, generateIntegrationTestCasesStream, generateE2ETestCasesStream, runUnitTestsStream, runIntegrationTestsStream, runE2ETestsStream, getTestRuns, getLastCompletedInstruction, getTestCaseItems, createStreamJsonRouter } from '../services/api'
 import type { TestCaseItem } from '../types'
 import { useLang } from '../i18n'
 import { classifyError, type ErrorCode } from '../errors'
@@ -576,6 +576,7 @@ export default function TaskDetail() {
     setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: clarifyKey, started: false }])
 
     let streamedText = ''
+    const router = createStreamJsonRouter()
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
       return [...prev, { type: 'clarify_streaming', content: '' }]
@@ -586,9 +587,11 @@ export default function TaskDetail() {
       userMsg,
       [],
       (chunk) => {
-        streamedText += chunk
+        // Left pane: raw stream-json verbatim. Right pane: reconstructed text.
+        const { raw } = router.push(chunk)
+        streamedText = router.text()
         setLogEntries(prev => prev.map(e =>
-          e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + chunk, started: true } : e
+          e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + raw, started: true } : e
         ))
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'clarify_streaming'
@@ -598,6 +601,7 @@ export default function TaskDetail() {
       },
       () => {
         setClarifying(false)
+        streamedText = router.text()
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\r?\n+/, '')
           setChatEntries(prev => prev.map((e, i) =>
@@ -608,7 +612,7 @@ export default function TaskDetail() {
         } else {
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'clarify_question', content: streamedText.split('\n').filter(l => l !== '[Claude] ...').join('\n').trim() }
+              ? { type: 'clarify_question', content: streamedText.trim() }
               : e
           ))
         }
@@ -651,14 +655,16 @@ export default function TaskDetail() {
     setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: clarifyKey, started: false }])
 
     let streamedText = ''
+    const router = createStreamJsonRouter()
     await clarifyStream(
       taskId,
       (chatEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined)?.content ?? '',
       newHistory,
       (chunk) => {
-        streamedText += chunk
+        const { raw } = router.push(chunk)
+        streamedText = router.text()
         setLogEntries(prev => prev.map(e =>
-          e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + chunk, started: true } : e
+          e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + raw, started: true } : e
         ))
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current && e.type === 'clarify_streaming'
@@ -668,6 +674,7 @@ export default function TaskDetail() {
       },
       () => {
         setClarifying(false)
+        streamedText = router.text()
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\r?\n+/, '')
           setChatEntries(prev => prev.map((e, i) =>
@@ -678,7 +685,7 @@ export default function TaskDetail() {
         } else {
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current
-              ? { type: 'clarify_question', content: streamedText.split('\n').filter(l => l !== '[Claude] ...').join('\n').trim() }
+              ? { type: 'clarify_question', content: streamedText.trim() }
               : e
           ))
         }
@@ -765,28 +772,20 @@ export default function TaskDetail() {
     const foundInstruction = currentEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined
     const instructionContent = foundInstruction?.content ?? originalInstruction
 
-    let promptText = ''
+    const router = createStreamJsonRouter()
     await generatePromptStream(
       taskId,
       instructionContent,
       instruction,
       (chunk) => {
-        promptText += chunk
+        // Left pane: raw stream-json. Right pane: reconstructed prompt text.
+        const { raw } = router.push(chunk)
         setLogEntries(prev => prev.map(e =>
-          e.kind === 'stream' && e.key === promptKey ? { ...e, text: e.text + chunk, started: true } : e
+          e.kind === 'stream' && e.key === promptKey ? { ...e, text: e.text + raw, started: true } : e
         ))
       },
       () => {
-        const cleaned = promptText
-          .split('\n')
-          .filter(line =>
-            !line.startsWith('[Thinking]') &&
-            !line.startsWith('[Tool:') &&
-            !line.startsWith('[Result]') &&
-            line !== '[Claude] ...'
-          )
-          .join('\n')
-          .trim()
+        const cleaned = router.text().trim()
         setGenerating(false)
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
@@ -827,28 +826,19 @@ export default function TaskDetail() {
     const promptKey = `stream-${streamKeyRef.current}`
     setLogEntries(prev => [...prev, { kind: 'stream', text: '', key: promptKey, started: false }])
 
-    let promptText = ''
+    const router = createStreamJsonRouter()
     await generatePromptStream(
       taskId,
       originalInstruction?.content ?? '',
       instruction,
       (chunk) => {
-        promptText += chunk
+        const { raw } = router.push(chunk)
         setLogEntries(prev => prev.map(e =>
-          e.kind === 'stream' && e.key === promptKey ? { ...e, text: e.text + chunk, started: true } : e
+          e.kind === 'stream' && e.key === promptKey ? { ...e, text: e.text + raw, started: true } : e
         ))
       },
       () => {
-        const cleaned = promptText
-          .split('\n')
-          .filter(line =>
-            !line.startsWith('[Thinking]') &&
-            !line.startsWith('[Tool:') &&
-            !line.startsWith('[Result]') &&
-            line !== '[Claude] ...'
-          )
-          .join('\n')
-          .trim()
+        const cleaned = router.text().trim()
         setGenerating(false)
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
@@ -2764,9 +2754,11 @@ export default function TaskDetail() {
                       </p>
                     )
                   } else {
-                    const HIDDEN_PREFIXES = ['[XOLVIEN_PROGRESS]', '[XOLVIEN_TC_START]', '[XOLVIEN_TC_DONE]', '[Claude] ...']
+                    // Left pane = raw stream-json (console.log-equivalent). Show
+                    // every line verbatim; only drop the internal keepalive lines
+                    // we inject to keep the stream alive (not Claude's output).
                     const lines = entry.text
-                      ? entry.text.split('\n').filter(l => l.trim() && !HIDDEN_PREFIXES.some(p => l.startsWith(p)))
+                      ? entry.text.split('\n').filter(l => l.trim() && !l.includes('"_xolvien_keepalive"'))
                       : []
                     return (
                       <div key={entry.key}>
