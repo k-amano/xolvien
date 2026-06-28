@@ -22,15 +22,18 @@ These are everyday pain points that affect every task. Do these first.
 | 1.2 | **Always-available Message Sending** ✅ Done (2026-06-22) | The textarea is no longer disabled while busy — only a missing/initializing container disables it. A message sent during processing is **enqueued** (FIFO) and auto-sent one at a time as soon as the app is idle, via a flush effect keyed on the busy flags. Queued messages show as a removable list above the input; each is routed by the phase at send time (clarify answer vs new/modify instruction). The send button shows "Queue" while busy. Confirm/approve actions remain button-only and are not queued. |
 | 1.3 | **Exception Handling Improvements** ✅ Done (2026-06-22) | Cause-based `ErrorCode` taxonomy is the source of truth. Backend: `app/errors.py` defines the enum + classifier; FastAPI `exception_handler`s standardize all non-streaming responses to `{ code, message, detail }`; streaming endpoints emit a terminal `[[XOLVIEN_ERROR:CODE]]` sentinel. Frontend: `src/errors.ts` mirrors the enum with a fallback classifier; `api.ts` resolves a code at the stream boundary; the i18n `errorCatalog` maps each code to user copy. A top-level React `ErrorBoundary` (`components/ErrorBoundary.tsx`) catches unhandled render exceptions and shows a self-contained recovery screen (Reload / Home) instead of a blank page. |
 
-### Sprint 2 — File Upload for Requirements Analysis (large feature: input)
+### Sprint 2 — File Upload for Requirements Analysis (large feature: input) ✅ Done (2026-06-22)
 
-Upload spec/design documents and screen mockups as attachments to an instruction, covering content that text alone cannot express (tables, diagrams, embedded images).
+Upload spec/design documents and screen mockups so Claude can read them when generating and implementing code.
 
-- **Primary use case**: Upload a PDF/Word/Excel spec and say "implement according to this." The file is passed directly to Claude — tables, diagrams, and all — without lossy conversion.
-- **Secondary use case**: Upload wireframes / UI screenshots (PNG/JPG) as visual supplements.
-- **File handling**: PDF → `document` block; PNG/JPG → `image` block (Vision); Word (.docx) → text/tables via `python-docx` + extracted images; Excel (.xlsx) → per-sheet structured text via `openpyxl` + extracted images; Markdown/text → `text` block.
-- **Backend**: `POST /api/v1/tasks/{id}/uploads` (`multipart/form-data`, multiple files). Store under `backend/uploads/{task_id}/` on the host (persists independently of container). Include stored uploads as extra blocks in `clarify_requirements()` and `execute_instruction()`. Add `python-docx`, `openpyxl` deps.
-- **Frontend**: Paperclip button on the input area; attached files shown as removable chips; upload-on-select with a per-chip spinner; no textarea auto-population.
+**Design decision (changed from the original task-scoped spec):** uploads are attached to the **Repository (project)**, not to a single task. A project's fixes each become a separate task, so task-scoped uploads would force re-uploading the same spec every time. Repository-scoped uploads are referenced repeatedly by every fix-task.
+
+**Claude integration (changed from the original direct-API spec):** this project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. So uploads are copied from the host into the container's `/workspace/uploads/` and referenced by path in the prompt; Claude Code reads PDFs/images/docs natively. (The `pdfplumber`/`python-docx`/`openpyxl` extraction approach was not needed.)
+
+- **Storage**: persistent `task_data` volume at `/data/uploads/repos/{repository_id}/{upload_id}_{filename}` — survives container rebuilds, per-task volume removal, and Reset & Rebuild.
+- **Data model**: `Repository ──< Upload` (`uploads` table: `id, repository_id, filename, content_type, stored_path, size, created_at`). File bytes on the volume, metadata in DB.
+- **Backend**: `POST/GET/DELETE /api/v1/repositories/{id}/uploads` (`multipart/form-data`, `aiofiles`). `DockerService.copy_uploads_to_container()` tars uploads into `/workspace/uploads/` on each Claude run. `ClaudeCodeService._prepare_uploads()` injects an "Uploaded Reference Files" section into the `clarify_requirements()` and `execute_instruction()` prompts. (`python-multipart` + `aiofiles` were already present.)
+- **Frontend**: `RepositoryUploads` component (📎 attach, removable chips, upload-on-select) shown in TaskCreate (when an existing repo is selected) and TaskDetail (repo strip below the topbar).
 
 ### Sprint 3 — Automatic Document Generation (large feature: output)
 

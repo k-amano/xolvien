@@ -34,12 +34,15 @@ services:
       DOCKER_SOCKET: /var/run/docker.sock
       WORKSPACE_IMAGE: ${WORKSPACE_IMAGE:-xolvien-workspace:latest}
       TASK_DATA_PATH: /data/tasks
+      UPLOAD_DATA_PATH: /data/uploads
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
       - /var/run/docker.sock:/var/run/docker.sock
-      - task_data:/data/tasks
+      # Mount the persistent volume at /data so both /data/tasks and
+      # /data/uploads (repository uploads) survive container rebuilds.
+      - task_data:/data
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     profiles:
       - full

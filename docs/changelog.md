@@ -4,6 +4,27 @@
 
 ## 2026-06-22
 
+### Repository-scoped file uploads for requirements analysis (Roadmap Sprint 2)
+
+Upload spec/design docs and screen mockups so Claude Code reads them when
+generating and implementing code.
+
+**Two design changes from the original spec:**
+- **Scope:** uploads attach to the **Repository (project)**, not a task — a project's fixes each become a task, so task-scoped uploads would require re-uploading the same spec each time. Repository-scoped uploads are referenced repeatedly by every fix-task.
+- **Claude integration:** files are passed via the **Claude Code CLI** (copied into the container, referenced by path) rather than the Claude API document/image blocks, matching this project's CLI architecture. `pdfplumber`/`python-docx`/`openpyxl` extraction was not needed.
+
+**Backend:**
+- New `models/upload.py` (`Upload`) + `Repository.uploads` relationship; `schemas/upload.py`; Alembic migration `f1a2b3c4d5e6` (`uploads` table, head was `e74383bc60a3`).
+- `config.py`: `upload_data_path` (default `/tmp/xolvien/uploads`); `docker-compose.yml`: `UPLOAD_DATA_PATH=/data/uploads` and the persistent `task_data` volume now mounts at `/data` so both `/data/tasks` and `/data/uploads` survive rebuilds.
+- `api/repositories.py`: `POST/GET/DELETE /api/v1/repositories/{id}/uploads` (`multipart/form-data`, streamed to disk with `aiofiles`). Files stored at `/data/uploads/repos/{repository_id}/{upload_id}_{filename}`.
+- `services/docker_service.py`: `copy_uploads_to_container()` tars the repo's uploads into the container's `/workspace/uploads/` (re-copied each run, so it survives Reset & Rebuild).
+- `services/claude_service.py`: `_prepare_uploads()` copies uploads + injects an "Uploaded Reference Files" section into the `clarify_requirements()` and `execute_instruction()` prompts (EN/JA).
+
+**Frontend:**
+- New `components/RepositoryUploads.tsx` (📎 attach, upload-on-select, removable chips); `Upload` type; `getRepositoryUploads` / `uploadRepositoryFiles` / `deleteRepositoryUpload` in `api.ts`.
+- Wired into `TaskCreate.tsx` (when an existing repo is selected) and `TaskDetail.tsx` (repo strip below the topbar). i18n keys added (EN/JA).
+
+
 ### React ErrorBoundary for unhandled render exceptions (Roadmap Sprint 1.3)
 
 - New `components/ErrorBoundary.tsx`: a class component catching render-time exceptions via `getDerivedStateFromError` / `componentDidCatch`. Shows a self-contained recovery screen (⛔, bilingual copy, **Reload** / **Home** buttons) instead of a blank page. The technical detail goes to the console only, never to the user. Kept context/i18n-free so it still renders if the surrounding tree is broken.

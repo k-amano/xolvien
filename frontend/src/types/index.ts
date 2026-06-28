@@ -19,6 +19,15 @@ export interface Repository {
   updated_at: string
 }
 
+export interface Upload {
+  id: number
+  repository_id: number
+  filename: string
+  content_type?: string
+  size: number
+  created_at: string
+}
+
 export interface Task {
   id: number
   title: string

@@ -5,6 +5,7 @@ import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStr
 import type { TestCaseItem } from '../types'
 import { useLang } from '../i18n'
 import { classifyError, type ErrorCode } from '../errors'
+import { RepositoryUploads } from '../components/RepositoryUploads'
 
 type ChatEntry =
   | { type: 'user_instruction'; content: string }
@@ -2722,6 +2723,17 @@ export default function TaskDetail() {
               {stopping ? t.stopping : t.stop}
             </button>
           )}
+        </div>
+
+        {/* Repository-level reference files — shared across all tasks of this project */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          padding: '6px 24px', borderBottom: '1px solid #21262d', flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: '0.72rem', color: '#8b949e', fontWeight: 600, flexShrink: 0 }}>
+            {t.repoAttachments}
+          </span>
+          <RepositoryUploads repositoryId={task.repository_id} compact />
         </div>
 
         <div className="task-detail-body" ref={bodyRef}>

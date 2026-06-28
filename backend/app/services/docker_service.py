@@ -194,6 +194,51 @@ class DockerService:
         except Exception as e:
             raise RuntimeError(f"Failed to execute command: {e}")
 
+    def copy_uploads_to_container(
+        self,
+        container_id: str,
+        host_dir: str,
+        dest_dir: str = "/workspace/uploads",
+    ) -> list[str]:
+        """
+        Copy a repository's uploaded files from the host volume into the task
+        container so Claude Code can read them.
+
+        Files are re-copied on every call (not persisted in the container) so
+        they survive Reset & Rebuild and container recreation — the source of
+        truth is the host upload directory.
+
+        Args:
+            container_id: Target container ID
+            host_dir: Host directory holding the repository's uploads
+            dest_dir: Destination directory inside the container
+
+        Returns:
+            The list of filenames copied (empty if the directory has no files).
+        """
+        if not os.path.isdir(host_dir):
+            return []
+        names = [n for n in sorted(os.listdir(host_dir))
+                 if os.path.isfile(os.path.join(host_dir, n))]
+        if not names:
+            return []
+
+        self.ensure_container_running(container_id)
+        container = self.client.containers.get(container_id)
+        # Reset the destination so removed uploads don't linger between runs.
+        container.exec_run(["bash", "-c", f"rm -rf {dest_dir} && mkdir -p {dest_dir}"])
+
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+            for name in names:
+                tar.add(os.path.join(host_dir, name), arcname=name)
+        tar_buf.seek(0)
+        container.put_archive(dest_dir, tar_buf)
+        container.exec_run(
+            ["bash", "-c", f"chown -R xolvien:xolvien {dest_dir} 2>/dev/null || true"]
+        )
+        return names
+
     async def execute_command_stream(
         self,
         container_id: str,

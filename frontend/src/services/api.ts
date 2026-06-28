@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Repository, Task, TaskLog, TestRun, Instruction, TestCaseItem } from '../types'
+import type { Repository, Task, TaskLog, TestRun, Instruction, TestCaseItem, Upload } from '../types'
 import { classifyError, extractSentinel, codeFromBody, type ErrorCode } from '../errors'
 
 const AUTH_TOKEN = 'dev-token-12345'
@@ -99,6 +99,28 @@ export async function createGitHubRepository(data: {
 }): Promise<Repository> {
   const res = await apiClient.post<Repository>('/api/v1/repositories/github', data)
   return res.data
+}
+
+// ── Repository uploads (spec/design docs, referenced across the project) ──────
+
+export async function getRepositoryUploads(repositoryId: number): Promise<Upload[]> {
+  const res = await apiClient.get<Upload[]>(`/api/v1/repositories/${repositoryId}/uploads`)
+  return res.data
+}
+
+export async function uploadRepositoryFiles(repositoryId: number, files: File[]): Promise<Upload[]> {
+  const form = new FormData()
+  files.forEach(f => form.append('files', f))
+  const res = await apiClient.post<Upload[]>(
+    `/api/v1/repositories/${repositoryId}/uploads`,
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  )
+  return res.data
+}
+
+export async function deleteRepositoryUpload(repositoryId: number, uploadId: number): Promise<void> {
+  await apiClient.delete(`/api/v1/repositories/${repositoryId}/uploads/${uploadId}`)
 }
 
 export async function getTasks(): Promise<Task[]> {

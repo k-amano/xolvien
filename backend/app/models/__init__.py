@@ -7,6 +7,7 @@ from app.models.test_run import TestRun
 from app.models.test_case_item import TestCaseItem
 from app.models.test_case_result import TestCaseResult
 from app.models.task_log import TaskLog
+from app.models.upload import Upload
 
 __all__ = [
     "User",
@@ -17,4 +18,5 @@ __all__ = [
     "TestCaseItem",
     "TestCaseResult",
     "TaskLog",
+    "Upload",
 ]

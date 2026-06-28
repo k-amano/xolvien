@@ -380,6 +380,56 @@ class ClaudeCodeService:
         )
         self.docker_service.execute_command(container_id, cmd, "/workspace")
 
+    async def _prepare_uploads(self, db: AsyncSession, task: Task, lang: str = "ja") -> str:
+        """
+        Copy the task's repository uploads into the container and return a prompt
+        fragment listing them. Returns "" when there are no uploads.
+
+        Uploads are repository-scoped, so they are available to every fix-task of
+        the project and re-copied on each call (surviving Reset & Rebuild).
+        """
+        from app.models.upload import Upload  # local import avoids a cycle
+        from app.config import get_settings
+
+        result = await db.execute(
+            select(Upload).where(Upload.repository_id == task.repository_id).order_by(Upload.created_at)
+        )
+        uploads = result.scalars().all()
+        if not uploads:
+            return ""
+
+        host_dir = os.path.join(get_settings().upload_data_path, "repos", str(task.repository_id))
+        try:
+            copied = self.docker_service.copy_uploads_to_container(
+                task.container_id, host_dir, "/workspace/uploads"
+            )
+        except Exception:
+            copied = []
+        if not copied:
+            return ""
+
+        # Map stored filenames (id_originalname) back to original display names.
+        by_stored = {f"{u.id}_{os.path.basename(u.filename)}": u.filename for u in uploads}
+        lines = []
+        for name in copied:
+            display = by_stored.get(name, name)
+            lines.append(f"- /workspace/uploads/{name}  ({display})")
+        listing = "\n".join(lines)
+
+        if lang == "en":
+            return (
+                "\n## Uploaded Reference Files\n\n"
+                "The user attached the following files. Read them (they may be specs, "
+                "design docs, or screen mockups) and follow them when relevant:\n"
+                f"{listing}\n"
+            )
+        return (
+            "\n## 添付ファイル\n\n"
+            "ユーザーが以下のファイルを添付しています。必要に応じて内容を読み取り"
+            "（仕様書・設計書・画面モックなど）、それに従ってください:\n"
+            f"{listing}\n"
+        )
+
     def reset_workspace(self, container_id: str) -> None:
         """Delete all files under /workspace/repo and reinitialise a bare git repo."""
         cmd = (
@@ -426,6 +476,9 @@ class ClaudeCodeService:
             "/workspace/repo",
         )
 
+        # Repository-level uploaded reference files (specs, design docs, mockups)
+        uploads_section = await self._prepare_uploads(db, task, lang)
+
         # Build conversation history text
         history_text = ""
         if history:
@@ -446,7 +499,7 @@ File list:
 
 README:
 {readme[:2000].strip()}
-
+{uploads_section}
 ## User Instruction
 
 {instruction}
@@ -496,7 +549,7 @@ No preamble or explanation. No numbered prefix on the question itself.
 
 README:
 {readme[:2000].strip()}
-
+{uploads_section}
 ## ユーザーの指示
 
 {instruction}
@@ -745,8 +798,16 @@ README:
             yield f"[SYSTEM] Instruction received\n"
             yield f"[SYSTEM] {instruction_content}\n\n"
 
+            # Copy repository uploads into the container and prepend a reference
+            # to them so Claude reads the attached specs/designs during execution.
+            uploads_section = await self._prepare_uploads(db, task, "ja")
+            prompt_text = instruction_content
+            if uploads_section:
+                yield "[SYSTEM] Attached reference files made available at /workspace/uploads/\n\n"
+                prompt_text = f"{instruction_content}\n{uploads_section}"
+
             # Write prompt and agent runner script into the container
-            self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", instruction_content)
+            self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", prompt_text)
             self._write_text_to_container(task.container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_EXECUTE)
 
             yield "[Claude] Running Claude Code CLI...\n\n"

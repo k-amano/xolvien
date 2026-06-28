@@ -22,3 +22,4 @@ class Repository(Base):
     # Relationships
     owner = relationship("User", backref="repositories")
     tasks = relationship("Task", back_populates="repository", cascade="all, delete-orphan")
+    uploads = relationship("Upload", back_populates="repository", cascade="all, delete-orphan")

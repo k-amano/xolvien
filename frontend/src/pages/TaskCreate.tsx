@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import type { Repository } from '../types'
 import { getRepositories, createRepository, createGitHubRepository, createTask } from '../services/api'
+import { RepositoryUploads } from '../components/RepositoryUploads'
 import { useLang } from '../i18n'
 
 type RepoMode = 'existing' | 'new' | 'github'
@@ -265,6 +266,12 @@ export default function TaskCreate() {
                   )}
                   {errors.repoId && (
                     <p className="form-error">{errors.repoId}</p>
+                  )}
+                  {selectedRepoId && (
+                    <div style={{ marginTop: '10px' }}>
+                      <label className="form-label">{t.repoAttachments}</label>
+                      <RepositoryUploads repositoryId={parseInt(selectedRepoId, 10)} />
+                    </div>
                   )}
                 </div>
               ) : (

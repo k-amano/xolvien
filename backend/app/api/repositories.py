@@ -1,16 +1,25 @@
 """Repository management endpoints."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+import os
 import httpx
+import aiofiles
 
 from app.database import get_db
 from app.models.repository import Repository
 from app.models.user import User
+from app.models.upload import Upload
 from app.schemas.repository import RepositoryCreate, RepositoryResponse, RepositoryUpdate, GitHubRepoCreate
+from app.schemas.upload import UploadResponse
 from app.api.auth import verify_token
 from app.config import get_settings
+
+
+def _repo_upload_dir(repository_id: int) -> str:
+    """Host directory holding a repository's uploads (on the persistent volume)."""
+    return os.path.join(get_settings().upload_data_path, "repos", str(repository_id))
 
 router = APIRouter(prefix="/api/v1/repositories", tags=["repositories"])
 
@@ -181,4 +190,104 @@ async def delete_repository(
     await db.delete(repository)
     await db.commit()
 
+    return None
+
+
+# ── Repository uploads (spec/design docs for requirements analysis) ───────────
+
+async def _get_repository_or_404(db: AsyncSession, repository_id: int) -> Repository:
+    result = await db.execute(select(Repository).where(Repository.id == repository_id))
+    repository = result.scalar_one_or_none()
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    return repository
+
+
+@router.get("/{repository_id}/uploads", response_model=List[UploadResponse])
+async def list_uploads(
+    repository_id: int,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """List files attached to a repository."""
+    await _get_repository_or_404(db, repository_id)
+    result = await db.execute(
+        select(Upload).where(Upload.repository_id == repository_id).order_by(Upload.created_at)
+    )
+    return result.scalars().all()
+
+
+@router.post("/{repository_id}/uploads", response_model=List[UploadResponse], status_code=201)
+async def upload_files(
+    repository_id: int,
+    files: List[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """
+    Attach one or more files to a repository. Stored on the persistent host
+    volume so they survive task containers and can be referenced repeatedly.
+    """
+    await _get_repository_or_404(db, repository_id)
+
+    dest_dir = _repo_upload_dir(repository_id)
+    os.makedirs(dest_dir, exist_ok=True)
+
+    created: List[Upload] = []
+    for file in files:
+        # Create the row first to get an id for a collision-free stored name.
+        upload = Upload(
+            repository_id=repository_id,
+            filename=file.filename or "file",
+            content_type=file.content_type,
+            stored_path="",
+            size=0,
+        )
+        db.add(upload)
+        await db.flush()  # assigns upload.id without committing
+
+        stored_name = f"{upload.id}_{os.path.basename(upload.filename)}"
+        stored_path = os.path.join(dest_dir, stored_name)
+
+        size = 0
+        async with aiofiles.open(stored_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                await out.write(chunk)
+
+        upload.stored_path = stored_path
+        upload.size = size
+        created.append(upload)
+
+    await db.commit()
+    for upload in created:
+        await db.refresh(upload)
+    return created
+
+
+@router.delete("/{repository_id}/uploads/{upload_id}", status_code=204)
+async def delete_upload(
+    repository_id: int,
+    upload_id: int,
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(verify_token),
+):
+    """Delete a repository upload (file + metadata)."""
+    result = await db.execute(
+        select(Upload).where(
+            Upload.id == upload_id, Upload.repository_id == repository_id
+        )
+    )
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    if upload.stored_path and os.path.isfile(upload.stored_path):
+        try:
+            os.remove(upload.stored_path)
+        except OSError:
+            pass  # metadata removal still proceeds
+
+    await db.delete(upload)
+    await db.commit()
     return None
