@@ -2,6 +2,41 @@
 
 ---
 
+## 2026-06-28
+
+### Raw stream-json left pane across all Claude flows
+
+The real-time log display had only ever been applied to the **execute** flow.
+clarify, prompt generation, and the test flows still ran `--output-format text`
+with a dummy `[Claude]...` keepalive, so their left pane showed almost nothing.
+Reworked per a clarified spec: **the left pane is a console.log-equivalent RAW
+view** — Claude Code CLI's `stream-json` lines flow through UNMODIFIED, with no
+`[Thinking]`/`[Tool:]`/`[Result]` reformatting and no dummy keepalive. The right
+pane is unchanged; the frontend reconstructs the text it needs.
+
+**Backend (`claude_service.py`):**
+- New unified `_RUNNER_SCRIPT_STREAM` used by all streamed flows. Streams raw `stream-json` verbatim; per-flow auth via a flags file (clarify: root + `HOME=xolvien` + no `--dangerously-skip-permissions`; others: drop-privs + skip). Keeps loop-detection. Emits a JSON keepalive `{"type":"_xolvien_keepalive"}` every 15s so the stream never goes silent.
+- Echoes the prompt sent to Claude as `{"type":"_xolvien_input",...}` so the left pane shows the INPUT (incl. the user instruction) as well as the output.
+- Removed dead `_RUNNER_SCRIPT` / `_RUNNER_SCRIPT_AGENT`; added `_write_runner` helper. Test code-gen `[XOLVIEN_TC_DONE]` counting reconstructs assistant text from `text_delta`. Auto-fix `chunk_timeout=120s`.
+
+**Frontend:**
+- New `createStreamJsonRouter()` in `api.ts`: raw chunk in → verbatim raw for the left pane + reconstructed assistant text (text_delta concat) for the right pane. Ignores keepalive/input/non-text events.
+- clarify ×2 and prompt-gen ×2 handlers route via the router; right-pane render unchanged. Left-pane filter now only drops the injected keepalive line.
+- Includes the earlier `pumpStream` fix (forward chunks immediately instead of buffering to end-of-stream — a 1.1 regression that had blanked the left pane).
+
+**Verified** for clarify/execute (left pane streams raw JSON input+output in real time). **Not yet re-verified:** test-flow pass/fail counting against raw JSON.
+
+### Sprint 2 file upload — reopened (binary files unreadable)
+
+Marked Sprint 2 as **partially done / blocked**: Claude Code CLI's `Read` tool
+rejects binary files (`This tool cannot read binary files` for `.xlsx`), so the
+primary use case (read an uploaded Excel/Word/PDF spec) does not work. The upload
+pipeline itself works; the binary-reading gap is a blocker tracked in `roadmap.md`
+with three candidate fixes (server-side text extraction / Claude API document
+blocks / in-container conversion).
+
+---
+
 ## 2026-06-22
 
 ### Repository-scoped file uploads for requirements analysis (Roadmap Sprint 2)

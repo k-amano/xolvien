@@ -22,18 +22,25 @@ These are everyday pain points that affect every task. Do these first.
 | 1.2 | **Always-available Message Sending** ✅ Done (2026-06-22) | The textarea is no longer disabled while busy — only a missing/initializing container disables it. A message sent during processing is **enqueued** (FIFO) and auto-sent one at a time as soon as the app is idle, via a flush effect keyed on the busy flags. Queued messages show as a removable list above the input; each is routed by the phase at send time (clarify answer vs new/modify instruction). The send button shows "Queue" while busy. Confirm/approve actions remain button-only and are not queued. |
 | 1.3 | **Exception Handling Improvements** ✅ Done (2026-06-22) | Cause-based `ErrorCode` taxonomy is the source of truth. Backend: `app/errors.py` defines the enum + classifier; FastAPI `exception_handler`s standardize all non-streaming responses to `{ code, message, detail }`; streaming endpoints emit a terminal `[[XOLVIEN_ERROR:CODE]]` sentinel. Frontend: `src/errors.ts` mirrors the enum with a fallback classifier; `api.ts` resolves a code at the stream boundary; the i18n `errorCatalog` maps each code to user copy. A top-level React `ErrorBoundary` (`components/ErrorBoundary.tsx`) catches unhandled render exceptions and shows a self-contained recovery screen (Reload / Home) instead of a blank page. |
 
-### Sprint 2 — File Upload for Requirements Analysis (large feature: input) ✅ Done (2026-06-22)
+### Sprint 2 — File Upload for Requirements Analysis (large feature: input) ⚠️ Partially done — blocked on binary file reading (2026-06-22)
 
 Upload spec/design documents and screen mockups so Claude can read them when generating and implementing code.
 
+**Status:** the upload pipeline (UI → API → volume → container → prompt reference) is implemented and working. **BUT the primary use case is not yet satisfied:** Claude Code CLI **cannot read binary files** — an uploaded `.xlsx` produces `This tool cannot read binary files. The file appears to be a binary .xlsx file.` So Excel/Word/PDF specs are attached but unreadable. Plain-text/Markdown uploads work; images (PNG/JPG) are untested. **This must be resolved before Sprint 2 is complete** (see Known issue below).
+
 **Design decision (changed from the original task-scoped spec):** uploads are attached to the **Repository (project)**, not to a single task. A project's fixes each become a separate task, so task-scoped uploads would force re-uploading the same spec every time. Repository-scoped uploads are referenced repeatedly by every fix-task.
 
-**Claude integration (changed from the original direct-API spec):** this project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. So uploads are copied from the host into the container's `/workspace/uploads/` and referenced by path in the prompt; Claude Code reads PDFs/images/docs natively. (The `pdfplumber`/`python-docx`/`openpyxl` extraction approach was not needed.)
+**Claude integration (changed from the original direct-API spec):** this project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. Uploads are copied from the host into `/workspace/uploads/` and referenced by path in the prompt. The assumption that Claude Code reads PDFs/Excel/Word natively turned out to be **false** for binary formats (see Known issue).
 
 - **Storage**: persistent `task_data` volume at `/data/uploads/repos/{repository_id}/{upload_id}_{filename}` — survives container rebuilds, per-task volume removal, and Reset & Rebuild.
 - **Data model**: `Repository ──< Upload` (`uploads` table: `id, repository_id, filename, content_type, stored_path, size, created_at`). File bytes on the volume, metadata in DB.
 - **Backend**: `POST/GET/DELETE /api/v1/repositories/{id}/uploads` (`multipart/form-data`, `aiofiles`). `DockerService.copy_uploads_to_container()` tars uploads into `/workspace/uploads/` on each Claude run. `ClaudeCodeService._prepare_uploads()` injects an "Uploaded Reference Files" section into the `clarify_requirements()` and `execute_instruction()` prompts. (`python-multipart` + `aiofiles` were already present.)
 - **Frontend**: `RepositoryUploads` component (📎 attach, removable chips, upload-on-select) shown in TaskCreate (when an existing repo is selected) and TaskDetail (repo strip below the topbar).
+
+**Known issue — binary files unreadable (BLOCKER):** Claude Code CLI's `Read` tool rejects binary files (`.xlsx`/`.docx`/`.pdf`). Options to resolve, to be decided:
+1. Convert binaries to text/Markdown on upload (e.g. `openpyxl`/`python-docx`/`pdfplumber` server-side) and place the converted text in `/workspace/uploads/` alongside (or instead of) the binary — revives the original spec's extraction approach.
+2. Switch the upload→Claude path to the **Claude API** with `document`/`image` blocks (the original spec) for these formats, while keeping the CLI for code work.
+3. Pre-install a CLI-readable conversion step the agent can invoke.
 
 ### Sprint 3 — Automatic Document Generation (large feature: output)
 
@@ -70,6 +77,10 @@ Auto-generate structured documents at each phase transition (no button press). D
 ## Completed
 
 Newest first. Full change notes are in `changelog.md`.
+
+### 2026-06-28 (session 6)
+
+- **Left pane = raw stream-json across all flows** — The real-time log display (originally execute-only) was unified onto raw `stream-json` for clarify / prompt-gen / execute / test flows. The left pane now shows Claude's input (echoed prompt) + output verbatim (console.log-equivalent); the right pane is unchanged (a shared frontend parser reconstructs the text it needs). Removed the dummy `[Claude]...` keepalive (replaced with a JSON keepalive). **Verified for clarify/execute; test-flow pass/fail counting not yet re-verified against raw JSON.**
 
 ### 2026-06 (session 4)
 
