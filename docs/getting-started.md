@@ -785,23 +785,20 @@ To revise, type your feedback (e.g. "Please also add X") and click **"Regenerate
 
 ## Step 13 — Wait for generation to complete
 
-After clicking "Confirm & Execute", Claude's output streams into the log area in real time:
+After clicking "Confirm & Execute", Claude's activity streams into the left log area in real time. The log area is a **raw view** (like a console): it shows the exact `stream-json` lines from Claude Code CLI — the prompt that was sent, Claude's thinking, tool calls (file reads, code generation, file writes), and results — as JSON, line by line:
 
 ```
-[SYSTEM] Instruction received
-
-[Claude] Running Claude Code CLI...
-
-(Claude's thinking and work logs appear here)
-(File reading, code generation, and file writing happen automatically)
+{"type":"_xolvien_input","prompt":"..."}
+{"type":"system","subtype":"init", ...}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
+... (more lines as Claude works) ...
 
 [GIT] Committing changes...
-[main abc1234] Please build a simple single-page web app...
-
 [SYSTEM] Done
 ```
 
-When **"Done"** appears and the status returns to **"idle"**, generation is complete.
+This raw stream is for transparency/debugging; you don't need to read it. The right pane shows the friendly summary. When **"Done"** appears and the status returns to **"idle"**, generation is complete.
 Everything including the commit is done automatically. Allow 1–3 minutes.
 
 ---

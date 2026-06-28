@@ -32,7 +32,7 @@ Single-user deployment. Multi-user support is a future extension.
 | Real-time communication | WebSocket (FastAPI) |
 | Authentication | Fixed Bearer token (`dev-token-12345`) |
 | Document rendering | Jinja2 (HTML templates), openpyxl (Excel templates) |
-| File parsing | pdfplumber (PDF), python-docx (Word), openpyxl (Excel) |
+| File parsing | pdfplumber (PDF), python-docx (Word), openpyxl (Excel) — *planned; not yet wired (see §5)* |
 
 ---
 
@@ -140,16 +140,17 @@ Errors are logged as `TaskLog` entries with `source=SYSTEM`. On error or stop, t
 
 Re-generating a document overwrites the existing row for the same `task_id` + `doc_type` combination.
 
-**uploads**
+**uploads** (attached to a **Repository**, not a task — see §5)
 
 | Column | Type | Description |
 |---|---|---|
 | id | INTEGER PK | |
-| task_id | INTEGER FK | |
+| repository_id | INTEGER FK | Owning repository |
 | filename | VARCHAR | Original filename |
-| file_type | ENUM | PDF / IMAGE / WORD / EXCEL / TEXT |
-| stored_path | VARCHAR | Absolute path on the host (`backend/uploads/{task_id}/`) |
-| uploaded_at | DATETIME | |
+| content_type | VARCHAR | MIME type as received |
+| stored_path | VARCHAR | Absolute path on the persistent `task_data` volume (`/data/uploads/repos/{repository_id}/{upload_id}_{filename}`) |
+| size | INTEGER | Byte size |
+| created_at | DATETIME | |
 
 ---
 
@@ -210,8 +211,10 @@ GET /api/v1/tasks/{id}/logs
 WS  /api/v1/ws/tasks/{id}/logs    ← WebSocket
 WS  /api/v1/ws/tasks/{id}/status  ← WebSocket
 
-# File uploads
-POST /api/v1/tasks/{id}/uploads                                        ← multipart/form-data, multiple files
+# File uploads (repository-scoped)
+POST   /api/v1/repositories/{id}/uploads                              ← multipart/form-data, multiple files
+GET    /api/v1/repositories/{id}/uploads                              ← list a repository's uploads
+DELETE /api/v1/repositories/{id}/uploads/{upload_id}                  ← remove a file + metadata
 
 # Document generation and rendering
 POST /api/v1/tasks/{id}/documents/generate/{doc_type}                  ← called internally at phase transitions
@@ -281,30 +284,34 @@ Each completed step in the step bar can be clicked to navigate directly to that 
 
 ## 5. File Upload
 
-Users can attach files to an instruction when text alone is insufficient — for example, uploading a PDF specification and writing "implement according to this spec."
+Users can attach reference files (spec/design documents, screen mockups) when text alone is insufficient — for example, uploading a specification and writing "implement according to this spec."
 
-### 5.1 Supported File Types and Processing
+Uploads are scoped to the **Repository (project)**, not to a single task. A project's fixes each become a separate task, so repository-scoped uploads are referenced repeatedly by every fix-task without re-uploading.
 
-| Type | How it is passed to Claude |
+> **Status (2026-06-28):** the upload pipeline is implemented, but the primary use case is **blocked**: Claude Code CLI cannot read binary files (`.xlsx`/`.docx`/`.pdf`). See `roadmap.md` Sprint 2 for the candidate fixes. Plain-text/Markdown uploads work today.
+
+### 5.1 How files reach Claude
+
+This project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. On each Claude run (`clarify_requirements()` / `execute_instruction()`), `DockerService.copy_uploads_to_container()` copies the repository's uploads from the host volume into `/workspace/uploads/`, and `ClaudeCodeService._prepare_uploads()` injects an "Uploaded Reference Files" section into the prompt listing the paths. Claude reads the files with its `Read` tool.
+
+| Type | Status |
 |---|---|
-| PDF | Uploaded via Claude `files` API and passed as a `document` block — text, tables, and embedded images are read natively by Claude. |
-| PNG / JPG | Passed as `image` blocks via Claude Vision. |
-| Word (.docx) | Text and table content extracted with `python-docx` (structure preserved). Embedded images extracted separately and passed as `image` blocks. Both combined into a single multimodal message. |
-| Excel (.xlsx) | Each sheet extracted with `openpyxl` as a structured text table (column/row layout preserved). Embedded images extracted and passed as `image` blocks. |
-| Markdown / plain text | Read as-is and included as a `text` block. |
+| Markdown / plain text | ✅ Read directly by Claude Code. |
+| PNG / JPG | Untested (Claude Code image support not yet verified in this path). |
+| PDF / Word (.docx) / Excel (.xlsx) | ❌ Blocked — Claude Code's `Read` tool rejects binary files. Needs server-side text extraction (`pdfplumber`/`python-docx`/`openpyxl`) or a Claude API `document`/`image` path. |
 
 ### 5.2 Storage
 
-- Files are stored on the host under `backend/uploads/{task_id}/`, independent of container lifecycle.
-- Multiple files can be attached per instruction.
-- When `clarify_requirements()` and `execute_instruction()` are called, the stored uploads for the task are included as additional blocks in the Claude API message.
+- Files are stored on the persistent `task_data` volume at `/data/uploads/repos/{repository_id}/{upload_id}_{filename}`, surviving container rebuilds, per-task volume removal, and Reset & Rebuild.
+- File bytes live on the volume; metadata in the `uploads` table.
+- Multiple files can be attached per repository; re-copied into the container on every Claude run.
 
 ### 5.3 Frontend Behavior
 
-- A file attachment button (paperclip icon) is shown in the instruction input area.
-- Attached filenames appear as chips above the textarea; each chip has a remove (×) button.
-- Files are uploaded immediately on selection; a spinner on the chip indicates upload in progress.
-- The textarea is not auto-populated — the user writes instruction text normally and files are attached silently.
+- A `RepositoryUploads` component (paperclip button) is shown in **TaskCreate** (when an existing repository is selected) and **TaskDetail** (a repository strip below the topbar).
+- Attached filenames appear as chips; each chip has a remove (×) button.
+- Files are uploaded immediately on selection.
+- The instruction textarea is not auto-populated — files are attached silently.
 
 ---
 
@@ -374,17 +381,18 @@ Each document is stored as a YAML string conforming to a fixed schema per `doc_t
 
 ## 7. Left-Pane Activity Log
 
-All Claude activity displayed in the left pane is automatically written to a log file on the host for later review.
+The left pane is a **console.log-equivalent raw view**: Claude Code CLI's `stream-json` output flows through **unmodified** (no `[Thinking]`/`[Tool:]`/`[Result]` reformatting). This raw activity is (planned to be) written to a host log file for later review.
 
-### 7.1 What is Logged
+### 7.1 What is shown / logged
 
-Everything that appears in the left pane during instruction execution:
-- `Starting Claude Code CLI...` header
-- `[Thinking]`, `[Tool: X]`, `[Result]` lines
-- Text delta lines (Claude's response text)
-- `[ERROR]` lines
+Everything streamed during a Claude run, verbatim, as raw `stream-json` lines:
+- `{"type":"_xolvien_input","prompt":...}` — the full prompt sent to Claude (input echo)
+- `{"type":"system",...}`, `{"type":"stream_event",...}` (thinking/text/tool deltas), `{"type":"user",...}` tool results — Claude's raw output
+- `{"type":"_xolvien_keepalive"}` — internal stream keepalive (filtered from the display, every 15s)
 
-Each entry is written in the format: `[{ISO8601 timestamp}] {line}`
+The same raw stream is parsed on the frontend (`createStreamJsonRouter`) only to reconstruct the text the **right pane** needs (clarify question / `PROMPT_READY` / generated prompt); the left pane itself is never reformatted.
+
+Persistent file logging is planned (Sprint 4.1): one file per run, each line `[{ISO8601 timestamp}] {raw line}`.
 
 ### 7.2 Storage
 
@@ -511,19 +519,20 @@ backend/
 │   ├── services/
 │   │   ├── docker_service.py    # Container lifecycle management
 │   │   ├── claude_service.py    # Claude Code CLI execution & test running
-│   │   ├── document_service.py  # Document YAML generation and template rendering
-│   │   ├── upload_service.py    # File upload processing (PDF/Word/Excel/image)
+│   │   ├── document_service.py  # Document YAML generation and template rendering (planned)
+│   │   │                         # (uploads have no dedicated service — see §9.4)
 │   │   └── test_service.py      # Test result parsing
 │   └── websocket/
 │       └── manager.py           # Per-task WebSocket connection pool
 ├── templates/
 │   ├── default/                 # Bundled standard templates (Excel + HTML per doc_type)
 │   └── {user_id}/               # User-uploaded custom templates
-├── uploads/
-│   └── {task_id}/               # Uploaded files (host-side, persisted)
 └── logs/
     └── tasks/
-        └── {task_id}/           # Left-pane activity logs (host-side, persisted)
+        └── {task_id}/           # Left-pane activity logs (host-side, persisted; planned)
+
+Repository uploads are NOT under backend/; they live on the persistent
+`task_data` volume at /data/uploads/repos/{repository_id}/.
 ```
 
 ### 9.2 ClaudeCodeService Key Methods
@@ -548,12 +557,17 @@ backend/
 | `generate_document(task_id, doc_type)` | Calls Claude to generate a YAML document of the given type. Saves to `task_documents`. Called internally at phase transitions. |
 | `render_document(task_id, doc_type, format)` | Loads YAML from DB, selects the appropriate template (custom if available, otherwise default), renders via Jinja2 (HTML) or openpyxl (Excel), returns file bytes. |
 
-### 9.4 UploadService
+### 9.4 Uploads (repository-scoped)
 
-| Method | Description |
+There is no standalone UploadService; the logic spans the repository API and the existing services:
+
+| Location | Responsibility |
 |---|---|
-| `process_upload(task_id, file)` | Saves the file to `backend/uploads/{task_id}/`, extracts content per file type, saves metadata to `uploads` table. Returns the content blocks to be passed to Claude. |
-| `get_upload_blocks(task_id)` | Returns all upload content blocks for a task, ready to be injected into a Claude API message as multimodal content. |
+| `api/repositories.py` | `POST/GET/DELETE /repositories/{id}/uploads` — streams files to the volume with `aiofiles`, manages the `uploads` table. |
+| `DockerService.copy_uploads_to_container()` | Tars a repository's uploads into the container's `/workspace/uploads/` on each Claude run. |
+| `ClaudeCodeService._prepare_uploads()` | Copies uploads + injects an "Uploaded Reference Files" prompt section into `clarify_requirements()` / `execute_instruction()`. |
+
+*(Binary text-extraction — `pdfplumber`/`python-docx`/`openpyxl` — is planned but not yet wired; see §5 status.)*
 
 ### 9.5 Docker Workspace
 
