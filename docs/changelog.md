@@ -32,6 +32,17 @@ listing verified for JA/EN with mocked DB/Docker. **Not verified:** an actual
 Claude run reading the converted spec inside a task container (requires a full
 task flow).
 
+### Sample specification shipped with the manual
+
+New `docs/samples/` directory (referenced from the getting-started guides'
+task-creation step): `sample-spec.xlsx` — a complete English specification for
+an Expense Tracker REST API (6 sheets: overview, FR-001..010, data model, 10
+API endpoints, VR-001..007 + error format, TP-001..010) sized to exercise the
+full pipeline (clarify → code → test → docs), plus `README.md` describing the
+sheets and usage. Replaces the throwaway Japanese greeting-app sample that sat
+untracked at the repo root. Conversion of the new sample verified via
+`document_converter` (~7k chars of structured Markdown).
+
 ---
 
 ## 2026-06-28

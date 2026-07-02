@@ -687,6 +687,8 @@ The dialog has three tabs: **"Select existing repository"**, **"Add new reposito
 
 > **About branch name:** Leaving it blank automatically creates a branch named `xolvien/{id}-{title-slug}` from `main` (e.g. `xolvien/1-translation-app`). Only fill this in if you need a specific branch name.
 
+> **Tip — attaching a specification:** If you already have a spec or design document (Excel/Word/PDF/Markdown), you can attach it with the **📎** button (shown here when an existing repository is selected, and on the task detail screen). Claude reads attached files when clarifying requirements and implementing. A full sample specification is provided at [`docs/samples/sample-spec.xlsx`](samples/README.md).
+
 ---
 
 ### Step C — Create
