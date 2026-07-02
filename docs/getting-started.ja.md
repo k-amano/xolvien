@@ -216,7 +216,8 @@ source venv/bin/activate
 ```bash
 pip install fastapi "uvicorn[standard]" sqlalchemy asyncpg psycopg2-binary \
     alembic python-dotenv docker pydantic pydantic-settings \
-    python-multipart websockets aiofiles
+    python-multipart websockets aiofiles \
+    openpyxl python-docx pdfplumber
 ```
 
 たくさんの文字が流れます。最後に以下のどちらかが表示されれば OK です。

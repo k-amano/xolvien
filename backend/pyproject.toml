@@ -20,6 +20,9 @@ pydantic-settings = "^2.1.0"
 python-multipart = "^0.0.6"
 websockets = "^12.0"
 aiofiles = "^23.2.1"
+openpyxl = "^3.1.5"
+python-docx = "^1.2.0"
+pdfplumber = "^0.11.10"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"

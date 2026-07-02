@@ -78,7 +78,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip install fastapi "uvicorn[standard]" sqlalchemy asyncpg psycopg2-binary \
     alembic python-dotenv docker pydantic pydantic-settings \
-    python-multipart websockets aiofiles
+    python-multipart websockets aiofiles \
+    openpyxl python-docx pdfplumber
 alembic upgrade head
 cd ..
 

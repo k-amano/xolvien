@@ -15,6 +15,7 @@ from app.models.task_log import TaskLog, LogLevel, LogSource
 from app.models.test_case_item import TestCaseItem
 from app.models.test_case_result import TestCaseResult, Verdict
 from app.services.docker_service import get_docker_service
+from app.services import document_converter
 
 # Unified RAW stream-json runner for ALL streamed Claude flows (clarify, prompt
 # generation, test code-gen, test auto-fix, execute).
@@ -297,6 +298,15 @@ class ClaudeCodeService:
             return ""
 
         host_dir = os.path.join(get_settings().upload_data_path, "repos", str(task.repository_id))
+
+        # Claude Code CLI cannot read binary files, so make sure every
+        # convertible binary (xlsx/docx/pdf) has an up-to-date Markdown sibling
+        # on the host before copying. Normally created at upload time; this
+        # lazily covers pre-existing uploads and earlier failures.
+        for u in uploads:
+            if u.stored_path:
+                await asyncio.to_thread(document_converter.ensure_converted, u.stored_path)
+
         try:
             copied = self.docker_service.copy_uploads_to_container(
                 task.container_id, host_dir, "/workspace/uploads"
@@ -308,10 +318,31 @@ class ClaudeCodeService:
 
         # Map stored filenames (id_originalname) back to original display names.
         by_stored = {f"{u.id}_{os.path.basename(u.filename)}": u.filename for u in uploads}
+        copied_set = set(copied)
+        suffix = document_converter.CONVERTED_SUFFIX
         lines = []
         for name in copied:
+            # Conversions are listed with their original below, not standalone.
+            if name.endswith(suffix) and name[: -len(suffix)] in copied_set:
+                continue
             display = by_stored.get(name, name)
-            lines.append(f"- /workspace/uploads/{name}  ({display})")
+            converted = name + suffix
+            if converted in copied_set:
+                # Point Claude at the readable conversion, not the binary.
+                if lang == "en":
+                    lines.append(
+                        f"- /workspace/uploads/{converted}  "
+                        f"({display} converted to Markdown — read THIS file; "
+                        f"the binary original cannot be read)"
+                    )
+                else:
+                    lines.append(
+                        f"- /workspace/uploads/{converted}  "
+                        f"（{display} をMarkdownに変換したもの。バイナリの原本は"
+                        f"読めないため、必ずこのファイルを読むこと）"
+                    )
+            else:
+                lines.append(f"- /workspace/uploads/{name}  ({display})")
         listing = "\n".join(lines)
 
         if lang == "en":

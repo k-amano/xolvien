@@ -208,7 +208,8 @@ After running, your prompt should show `(venv)` at the beginning:
 ```bash
 pip install fastapi "uvicorn[standard]" sqlalchemy asyncpg psycopg2-binary \
     alembic python-dotenv docker pydantic pydantic-settings \
-    python-multipart websockets aiofiles
+    python-multipart websockets aiofiles \
+    openpyxl python-docx pdfplumber
 ```
 
 A lot of text will scroll. You're done when you see either:

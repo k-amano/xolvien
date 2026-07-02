@@ -3,9 +3,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+import asyncio
 import os
 import httpx
 import aiofiles
+
+from app.services import document_converter
 
 from app.database import get_db
 from app.models.repository import Repository
@@ -259,6 +262,11 @@ async def upload_files(
         upload.size = size
         created.append(upload)
 
+        # Claude Code CLI cannot read binary files: extract Excel/Word/PDF to a
+        # Markdown sibling now so it is ready before the first Claude run.
+        # Failure is non-fatal (retried lazily in _prepare_uploads).
+        await asyncio.to_thread(document_converter.ensure_converted, stored_path)
+
     await db.commit()
     for upload in created:
         await db.refresh(upload)
@@ -287,6 +295,12 @@ async def delete_upload(
             os.remove(upload.stored_path)
         except OSError:
             pass  # metadata removal still proceeds
+    converted = document_converter.converted_path_for(upload.stored_path or "")
+    if upload.stored_path and os.path.isfile(converted):
+        try:
+            os.remove(converted)
+        except OSError:
+            pass
 
     await db.delete(upload)
     await db.commit()

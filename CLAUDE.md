@@ -56,7 +56,8 @@ cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install fastapi uvicorn sqlalchemy asyncpg psycopg2-binary alembic \
-    python-dotenv docker pydantic pydantic-settings python-multipart websockets aiofiles
+    python-dotenv docker pydantic pydantic-settings python-multipart websockets aiofiles \
+    openpyxl python-docx pdfplumber
 ```
 
 ### Linting / formatting (configured in pyproject.toml, not yet automated)

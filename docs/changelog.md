@@ -2,6 +2,38 @@
 
 ---
 
+## 2026-07-02
+
+### Sprint 2 completed — binary uploads converted to Markdown server-side
+
+Resolved the Sprint 2 blocker (Claude Code CLI's `Read` tool rejects binary
+files) with **option 1 — server-side text extraction**: uploaded Excel/Word/PDF
+documents are converted to a Markdown sibling file on the host volume, and the
+prompt points Claude at the readable `.md` instead of the binary. No DB change
+(naming convention `{stored_path}.md`), no new endpoints, no frontend change.
+
+**Backend:**
+- New `services/document_converter.py`:
+  - `.xlsx`/`.xlsm` via `openpyxl` (`read_only=True, data_only=True` — cached formula values): one `## Sheet: {name}` section per sheet, non-empty rows as a Markdown table.
+  - `.docx` via `python-docx` (`iter_inner_content()` preserves order): headings (`Heading N` → `#`×N), list paragraphs (`- `), plain paragraphs, tables.
+  - `.pdf` via `pdfplumber`: `## Page N` + extracted text + detected tables. No OCR — scanned PDFs yield `(no extractable text)`.
+  - `ensure_converted()` is idempotent (skips when the `.md` is newer than the source), failure-tolerant (logs a warning, removes any stale partial `.md`, returns `None` — never raises to callers), and sync (async callers use `asyncio.to_thread`).
+- `api/repositories.py`: `upload_files` converts right after saving each file; `delete_upload` also removes the `.md` sibling.
+- `services/claude_service.py` `_prepare_uploads()`: re-ensures conversions before each container copy (covers uploads that predate this feature or earlier failures), then lists converted binaries by their `/workspace/uploads/{stored}.md` path with an EN/JA note to read the conversion and not the binary original; the raw binary is not listed separately. Text/other uploads are listed as before. (`copy_uploads_to_container()` needed no change — the `.md` lives in the same host dir and is tarred in automatically.)
+- `pyproject.toml`: added `openpyxl`, `python-docx`, `pdfplumber`.
+
+**Verified:** end-to-end via the API — `POST /repositories/{id}/uploads` with
+`sample-spec.xlsx` produced `{id}_sample-spec.xlsx.md` (Japanese 仕様書 sheet →
+Markdown table) on the volume; DELETE removed both files. Generated `.docx`
+(headings/lists/tables) and `.pdf` samples converted correctly; a corrupt
+`.xlsx` logged a warning and returned `None` without failing the upload;
+re-conversion is skipped when the `.md` is up to date. `_prepare_uploads()`
+listing verified for JA/EN with mocked DB/Docker. **Not verified:** an actual
+Claude run reading the converted spec inside a task container (requires a full
+task flow).
+
+---
+
 ## 2026-06-28
 
 ### Raw stream-json left pane across all Claude flows

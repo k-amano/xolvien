@@ -288,22 +288,28 @@ Users can attach reference files (spec/design documents, screen mockups) when te
 
 Uploads are scoped to the **Repository (project)**, not to a single task. A project's fixes each become a separate task, so repository-scoped uploads are referenced repeatedly by every fix-task without re-uploading.
 
-> **Status (2026-06-28):** the upload pipeline is implemented, but the primary use case is **blocked**: Claude Code CLI cannot read binary files (`.xlsx`/`.docx`/`.pdf`). See `roadmap.md` Sprint 2 for the candidate fixes. Plain-text/Markdown uploads work today.
+> **Status (2026-07-02):** implemented, including binary documents. Excel/Word/PDF uploads are extracted to Markdown server-side (`services/document_converter.py`) so Claude Code can read them — see §5.1.
 
 ### 5.1 How files reach Claude
 
 This project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. On each Claude run (`clarify_requirements()` / `execute_instruction()`), `DockerService.copy_uploads_to_container()` copies the repository's uploads from the host volume into `/workspace/uploads/`, and `ClaudeCodeService._prepare_uploads()` injects an "Uploaded Reference Files" section into the prompt listing the paths. Claude reads the files with its `Read` tool.
 
+Claude Code's `Read` tool rejects binary files, so binary documents are **converted to Markdown server-side** at upload time (`services/document_converter.py`, using `openpyxl`/`python-docx`/`pdfplumber`). The conversion is written as a sibling file `{stored_path}.md` on the host volume, copied into the container together with the original, and the prompt listing points Claude at the `.md` path (with an instruction not to read the binary). Conversion is also retried lazily on each Claude run (`_prepare_uploads()`), covering uploads that predate this feature or whose conversion failed; a failed conversion never rejects the upload itself.
+
 | Type | Status |
 |---|---|
 | Markdown / plain text | ✅ Read directly by Claude Code. |
+| Excel (.xlsx/.xlsm) | ✅ Converted to Markdown on upload — one section per sheet, rows as Markdown tables (cached formula values, not formulas). |
+| Word (.docx) | ✅ Converted to Markdown on upload — headings, paragraphs, lists, tables in document order. |
+| PDF | ✅ Converted to Markdown on upload — per-page text + detected tables (`pdfplumber`; scanned/image-only PDFs yield no text — no OCR). |
 | PNG / JPG | Untested (Claude Code image support not yet verified in this path). |
-| PDF / Word (.docx) / Excel (.xlsx) | ❌ Blocked — Claude Code's `Read` tool rejects binary files. Needs server-side text extraction (`pdfplumber`/`python-docx`/`openpyxl`) or a Claude API `document`/`image` path. |
+| Other binaries | ❌ Not convertible; listed by path but unreadable by Claude Code. |
 
 ### 5.2 Storage
 
 - Files are stored on the persistent `task_data` volume at `/data/uploads/repos/{repository_id}/{upload_id}_{filename}`, surviving container rebuilds, per-task volume removal, and Reset & Rebuild.
 - File bytes live on the volume; metadata in the `uploads` table.
+- Markdown conversions of binary documents are stored alongside as `{upload_id}_{filename}.md` (no DB column — naming convention only) and deleted together with the upload.
 - Multiple files can be attached per repository; re-copied into the container on every Claude run.
 
 ### 5.3 Frontend Behavior
@@ -520,7 +526,7 @@ backend/
 │   │   ├── docker_service.py    # Container lifecycle management
 │   │   ├── claude_service.py    # Claude Code CLI execution & test running
 │   │   ├── document_service.py  # Document YAML generation and template rendering (planned)
-│   │   │                         # (uploads have no dedicated service — see §9.4)
+│   │   ├── document_converter.py # Binary upload (xlsx/docx/pdf) → Markdown extraction (see §9.4)
 │   │   └── test_service.py      # Test result parsing
 │   └── websocket/
 │       └── manager.py           # Per-task WebSocket connection pool
@@ -563,11 +569,10 @@ There is no standalone UploadService; the logic spans the repository API and the
 
 | Location | Responsibility |
 |---|---|
-| `api/repositories.py` | `POST/GET/DELETE /repositories/{id}/uploads` — streams files to the volume with `aiofiles`, manages the `uploads` table. |
-| `DockerService.copy_uploads_to_container()` | Tars a repository's uploads into the container's `/workspace/uploads/` on each Claude run. |
-| `ClaudeCodeService._prepare_uploads()` | Copies uploads + injects an "Uploaded Reference Files" prompt section into `clarify_requirements()` / `execute_instruction()`. |
-
-*(Binary text-extraction — `pdfplumber`/`python-docx`/`openpyxl` — is planned but not yet wired; see §5 status.)*
+| `api/repositories.py` | `POST/GET/DELETE /repositories/{id}/uploads` — streams files to the volume with `aiofiles`, manages the `uploads` table, triggers Markdown conversion on upload and deletes the `.md` sibling on delete. |
+| `services/document_converter.py` | Extracts binary documents (`.xlsx`/`.xlsm`/`.docx`/`.pdf`) to a Markdown sibling file via `openpyxl`/`python-docx`/`pdfplumber`. `ensure_converted()` is idempotent (mtime-checked) and failure-tolerant (returns `None`, never raises to callers). Sync functions; async callers use `asyncio.to_thread`. |
+| `DockerService.copy_uploads_to_container()` | Tars a repository's uploads (including `.md` conversions) into the container's `/workspace/uploads/` on each Claude run. |
+| `ClaudeCodeService._prepare_uploads()` | Ensures conversions exist, copies uploads + injects an "Uploaded Reference Files" prompt section into `clarify_requirements()` / `execute_instruction()`; converted binaries are listed by their `.md` path. |
 
 ### 9.5 Docker Workspace
 
