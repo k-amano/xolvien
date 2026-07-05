@@ -4,6 +4,43 @@
 
 ## 2026-07-05
 
+### Sprint 4.2 — Progress indicator improvements
+
+Fixed busy messages ("Thinking...", "Generating prompt...", "Running... (may
+take 1–3 min)") are replaced with real progress on every busy chat card.
+Frontend-only; no backend change.
+
+**New:**
+- `components/PhaseProgress.tsx` — status line rendered inside each busy card:
+  phase label + live elapsed counter (1 s tick) + estimated remaining + a slim
+  bar. Signal priority: real `done/total` counts → time-based estimate from
+  past runs (bar capped at 95%, remaining hint dropped once exceeded, nothing
+  claimed on the first run) → indeterminate sliding animation (CSS keyframes
+  in `styles.css`).
+- `services/phaseHistory.ts` — records each completed phase's duration in
+  `localStorage` (`xolvien-phase-durations`, last 10 per flow) and estimates
+  via the median. Tracked flows: `clarify`, `generate_prompt`, `execute`.
+
+**TaskDetail.tsx:**
+- Busy `ChatEntry` variants gained `startedAt` (and `progress` on
+  `test_running`); completion callbacks record durations (errors don't).
+- Test execution labels switched to `done / total complete` — the denominator
+  is the approved test-case count (`plannedTotal = items.length`) for all
+  three flows (unit / integration / E2E); auto-fix phases show an
+  indeterminate bar.
+- Test-case generation cards reuse the streamed `[XOLVIEN_PROGRESS]`
+  `done/total` for a determinate bar (`tcGenProgress` state).
+
+**i18n (ja/en):** `progressRunning` / `progressIntegration` / `progressE2E`
+now take `(done, total, failed)`; new `phaseElapsed` / `phaseRemaining` keys.
+
+**Verified:** `tsc --noEmit` + production build clean; browser-verified with
+Playwright against a live clarify flow — first run showed the indeterminate
+bar with `経過 0:09`, the duration (17.8 s) was recorded to localStorage, and
+the second run showed `経過 0:09 ・ 残り約 0:09` with a time-estimate bar.
+**Not verified live:** the test-execution `done / total` labels (same code
+path as the previously working counts; needs a full test run to observe).
+
 ### Sprint 4.1 — Left-pane activity log persisted to host files
 
 Everything the left pane shows (the raw `stream-json` conversation with Claude)

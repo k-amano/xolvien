@@ -207,14 +207,22 @@ export const ja = {
   emptyState: '指示を入力して開始してください',
 
   // TaskDetail - progress labels
-  progressRunning: (total: number, failed: number) =>
-    failed > 0 ? `テストを実行中 (${total}件完了 / ${failed}件失敗)` : `テストを実行中 (${total}件完了)`,
-  progressIntegration: (total: number, failed: number) =>
-    failed > 0 ? `結合テストを実行中 (${total}件完了 / ${failed}件失敗)` : `結合テストを実行中 (${total}件完了)`,
-  progressE2E: (total: number, failed: number) =>
-    failed > 0 ? `E2Eテストを実行中 (${total}件完了 / ${failed}件失敗)` : `E2Eテストを実行中 (${total}件完了)`,
+  progressRunning: (done: number, total: number, failed: number) => {
+    const count = total > 0 ? `${done} / ${total} 件完了` : `${done}件完了`
+    return failed > 0 ? `テストを実行中: ${count} (${failed}件失敗)` : `テストを実行中: ${count}`
+  },
+  progressIntegration: (done: number, total: number, failed: number) => {
+    const count = total > 0 ? `${done} / ${total} 件完了` : `${done}件完了`
+    return failed > 0 ? `結合テストを実行中: ${count} (${failed}件失敗)` : `結合テストを実行中: ${count}`
+  },
+  progressE2E: (done: number, total: number, failed: number) => {
+    const count = total > 0 ? `${done} / ${total} 件完了` : `${done}件完了`
+    return failed > 0 ? `E2Eテストを実行中: ${count} (${failed}件失敗)` : `E2Eテストを実行中: ${count}`
+  },
   autoFixing: (n: number, total: number) => `自動修正中 ${n}/${total}`,
   autoFix: '自動修正中',
+  phaseElapsed: (hms: string) => `経過 ${hms}`,
+  phaseRemaining: (hms: string) => `残り約 ${hms}`,
 
   // TaskDetail - session/error messages
   sessionRestoreError: 'セッション復元エラー: ',

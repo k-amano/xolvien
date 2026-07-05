@@ -488,11 +488,17 @@ Always visible at the top of the control panel. Steps: Implement → Unit Test �
 
 ### 8.4 Real-time Progress Display
 
-During test case generation (unit / integration / E2E), the chat entry updates live:
+Every busy chat card renders a `PhaseProgress` status line (roadmap 4.2, implemented 2026-07-05): the phase label, a live elapsed-time counter (1-second tick), an estimated remaining time when one can be computed, and a slim progress bar. The bar picks the best available signal, in order:
 
-- Shows `Generating test cases: done / total  (~mm:ss remaining)` (EN) or `テストケース生成中: done / total 件  (残り約mm:ss)` (JA).
-- Remaining time computed from elapsed time per batch × remaining batches, formatted as `mm:ss` (or `hh:mm:ss` if ≥ 1 hour).
-- The same format is used for test code generation progress during test execution.
+1. **Determinate** — real `done / total` counts when granular events exist (test-case generation, test-code generation, test execution). Remaining time is extrapolated from the observed pace of the current run.
+2. **Time-estimated** — for phases with no granular events (clarify, prompt generation, implementation), the bar advances against the **median of the last 10 runs of that phase**, recorded per browser in `localStorage` (`xolvien-phase-durations`); capped at 95% and the remaining-time hint is dropped once the estimate is exceeded. No estimate is shown on the very first run.
+3. **Indeterminate** — a sliding animation when neither signal exists yet.
+
+Label formats:
+
+- Test case / test code generation: `Generating test cases: done / total  (~mm:ss remaining)` (EN) / `テストケース生成中: done / total 件  (残り約mm:ss)` (JA). Remaining time computed from elapsed time per batch × remaining batches.
+- Test execution: `Running tests: done / total complete (n failed)` (EN) / `テストを実行中: done / total 件完了 (n件失敗)` (JA) — the denominator is the number of approved test cases; counts are parsed from pytest/jest output (auto-fix re-runs reset the counter and show an indeterminate bar).
+- Elapsed/remaining: `m:ss elapsed ・ ~m:ss remaining` (EN) / `経過 m:ss ・ 残り約 m:ss` (JA).
 
 ### 8.5 Test Case Review Card Operations
 

@@ -6,23 +6,29 @@ import type { TestCaseItem } from '../types'
 import { useLang } from '../i18n'
 import { classifyError, type ErrorCode } from '../errors'
 import { RepositoryUploads } from '../components/RepositoryUploads'
+import { PhaseProgress } from '../components/PhaseProgress'
+import { recordPhaseDuration } from '../services/phaseHistory'
+
+// Granular progress attached to a busy chat entry (roadmap 4.2); null while
+// the phase has produced no countable events yet.
+type PhaseCount = { done: number; total: number } | null
 
 type ChatEntry =
   | { type: 'user_instruction'; content: string }
   | { type: 'clarify_question'; content: string }
   | { type: 'clarify_answer'; content: string }
-  | { type: 'clarify_streaming'; content: string }
-  | { type: 'prompt_generating' }
+  | { type: 'clarify_streaming'; content: string; startedAt: number }
+  | { type: 'prompt_generating'; startedAt: number }
   | { type: 'prompt_generated'; content: string; confirmed: boolean }
-  | { type: 'implementation_running' }
+  | { type: 'implementation_running'; startedAt: number }
   | { type: 'implementation_done' }
-  | { type: 'test_cases_generating' }
+  | { type: 'test_cases_generating'; startedAt: number }
   | { type: 'test_cases_ready'; items: TestCaseItem[]; approved: boolean }
-  | { type: 'integration_test_cases_generating' }
+  | { type: 'integration_test_cases_generating'; startedAt: number }
   | { type: 'integration_test_cases_ready'; items: TestCaseItem[]; approved: boolean }
-  | { type: 'e2e_test_cases_generating' }
+  | { type: 'e2e_test_cases_generating'; startedAt: number }
   | { type: 'e2e_test_cases_ready'; items: TestCaseItem[]; approved: boolean }
-  | { type: 'test_running'; label: string }
+  | { type: 'test_running'; label: string; startedAt: number; progress: PhaseCount }
   | { type: 'test_done'; summary: string; passed: boolean; items: TestCaseItem[] }
   | { type: 'review'; prompt: string; items: TestCaseItem[]; resolved: boolean }
   | { type: 'error'; code: ErrorCode }
@@ -185,6 +191,7 @@ export default function TaskDetail() {
   // Test case / test run state
   const [generatingTestCases, setGeneratingTestCases] = useState(false)
   const [tcGenLabel, setTcGenLabel] = useState<string | null>(null)
+  const [tcGenProgress, setTcGenProgress] = useState<PhaseCount>(null)
   const [runningTests, setRunningTests] = useState(false)
   const [, setRunningTestType] = useState<'unit' | 'integration' | 'e2e' | null>(null)
   const [, setTestPhaseLabel] = useState<string | null>(null)
@@ -577,9 +584,10 @@ export default function TaskDetail() {
 
     let streamedText = ''
     const router = createStreamJsonRouter()
+    const phaseStartMs = Date.now()
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'clarify_streaming', content: '' }]
+      return [...prev, { type: 'clarify_streaming', content: '', startedAt: phaseStartMs }]
     })
 
     await clarifyStream(
@@ -601,6 +609,7 @@ export default function TaskDetail() {
       },
       () => {
         setClarifying(false)
+        recordPhaseDuration('clarify', Date.now() - phaseStartMs)
         streamedText = router.text()
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\r?\n+/, '')
@@ -643,10 +652,11 @@ export default function TaskDetail() {
       }))
     const newHistory = [...history, { role: 'user' as const, content: userMsg }]
 
+    const phaseStartMs = Date.now()
     setChatEntries(prev => {
       const withAnswer = [...prev, { type: 'clarify_answer' as const, content: userMsg }]
       streamingEntryIndexRef.current = withAnswer.length
-      return [...withAnswer, { type: 'clarify_streaming' as const, content: '' }]
+      return [...withAnswer, { type: 'clarify_streaming' as const, content: '', startedAt: phaseStartMs }]
     })
     setClarifying(true)
 
@@ -674,6 +684,7 @@ export default function TaskDetail() {
       },
       () => {
         setClarifying(false)
+        recordPhaseDuration('clarify', Date.now() - phaseStartMs)
         streamedText = router.text()
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\r?\n+/, '')
@@ -757,9 +768,10 @@ export default function TaskDetail() {
       setChatEntries(prev => [...prev, { type: 'user_instruction', content: originalInstruction }])
     }
     setGenerating(true)
+    const phaseStartMs = Date.now()
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'prompt_generating' }]
+      return [...prev, { type: 'prompt_generating', startedAt: phaseStartMs }]
     })
 
     streamKeyRef.current += 1
@@ -787,6 +799,7 @@ export default function TaskDetail() {
       () => {
         const cleaned = router.text().trim()
         setGenerating(false)
+        recordPhaseDuration('generate_prompt', Date.now() - phaseStartMs)
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
@@ -817,9 +830,10 @@ export default function TaskDetail() {
     ))
     const originalInstruction = chatEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined
 
+    const phaseStartMs = Date.now()
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'prompt_generating' }]
+      return [...prev, { type: 'prompt_generating', startedAt: phaseStartMs }]
     })
 
     streamKeyRef.current += 1
@@ -840,6 +854,7 @@ export default function TaskDetail() {
       () => {
         const cleaned = router.text().trim()
         setGenerating(false)
+        recordPhaseDuration('generate_prompt', Date.now() - phaseStartMs)
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
@@ -868,7 +883,8 @@ export default function TaskDetail() {
       e.type === 'prompt_generated' && !e.confirmed ? { ...e, confirmed: true } : e
     ))
 
-    setChatEntries(prev => [...prev, { type: 'implementation_running' }])
+    const phaseStartMs = Date.now()
+    setChatEntries(prev => [...prev, { type: 'implementation_running', startedAt: phaseStartMs }])
     setStreaming(true)
 
     streamKeyRef.current += 1
@@ -887,6 +903,7 @@ export default function TaskDetail() {
       },
       async () => {
         setStreaming(false)
+        recordPhaseDuration('execute', Date.now() - phaseStartMs)
         setSteps(prev => prev.map(s => s.id === 'implement' ? { ...s, status: 'done_pass' } : s))
         setChatEntries(prev => {
           const idx = [...prev].reverse().findIndex(e => e.type === 'implementation_running')
@@ -916,6 +933,7 @@ export default function TaskDetail() {
     setRunningTests(true)
     setRunningTestType('unit')
     testCountRef.current = { passed: 0, failed: 0 }
+    const plannedTotal = items.length
 
     setChatEntries(prev => prev.map(e =>
       e.type === 'test_cases_ready' && !e.approved ? { ...e, approved: true } : e
@@ -923,7 +941,7 @@ export default function TaskDetail() {
 
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'test_running', label: t.bannerTestGeneratingCode }]
+      return [...prev, { type: 'test_running', label: t.bannerTestGeneratingCode, startedAt: Date.now(), progress: null }]
     })
     genCodeProgressRef.current = { done: 0, total: 0, startMs: Date.now() }
 
@@ -943,6 +961,7 @@ export default function TaskDetail() {
           )
         )
         let newLabel: string | null = null
+        let newProgress: PhaseCount | undefined
         for (const line of chunk.split('\n')) {
           const progressMatch = line.match(/^\[XOLVIEN_PROGRESS\] (\d+)\/(\d+) elapsed_ms=(\d+) eta_ms=(\d+)/)
           if (progressMatch) {
@@ -952,15 +971,18 @@ export default function TaskDetail() {
             genCodeProgressRef.current = { done, total, startMs: genCodeProgressRef.current.startMs }
             const etaRawCode = etaMs > 0 ? Math.ceil(etaMs / 1000) : null
             newLabel = t.progressGenCode(done, total, etaRawCode !== null ? fmtHms(etaRawCode) : null)
+            newProgress = { done, total }
           }
         }
         if (!newLabel) {
           if (/\[(?:TEST|ITEST|E2E)\] (Running tests:|テストを実行しています|Re-running tests|テストを再実行しています)/.test(chunk)) {
             testCountRef.current = { passed: 0, failed: 0 }
-            newLabel = t.progressRunning(0, 0)
+            newLabel = t.progressRunning(0, plannedTotal, 0)
+            newProgress = { done: 0, total: plannedTotal }
           } else if (/\[(?:TEST|ITEST|E2E)\] (Auto-fix|自動修正)/.test(chunk)) {
             const m = chunk.match(/(?:Auto-fix|自動修正) \((\d+)\/(\d+)\)/)
             newLabel = m ? t.autoFixing(Number(m[1]), Number(m[2])) : t.autoFix
+            newProgress = null
           } else {
             let updated = false
             for (const line of chunk.split('\n')) {
@@ -978,7 +1000,8 @@ export default function TaskDetail() {
             }
             if (updated) {
               const { passed, failed } = testCountRef.current
-              newLabel = t.progressRunning(passed + failed, failed)
+              newLabel = t.progressRunning(passed + failed, plannedTotal, failed)
+              newProgress = { done: passed + failed, total: plannedTotal }
             }
           }
         }
@@ -986,7 +1009,7 @@ export default function TaskDetail() {
           setTestPhaseLabel(newLabel)
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current && e.type === 'test_running'
-              ? { ...e, label: newLabel! }
+              ? { ...e, label: newLabel!, progress: newProgress !== undefined ? newProgress : e.progress }
               : e
           ))
         }
@@ -1038,6 +1061,7 @@ export default function TaskDetail() {
     setRunningTests(true)
     setRunningTestType('integration')
     testCountRef.current = { passed: 0, failed: 0 }
+    const plannedTotal = items.length
 
     setChatEntries(prev => prev.map(e =>
       e.type === 'integration_test_cases_ready' && !e.approved ? { ...e, approved: true } : e
@@ -1045,7 +1069,7 @@ export default function TaskDetail() {
 
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'test_running', label: `${t.bannerIntegrationTest}${t.bannerTestGeneratingCode}` }]
+      return [...prev, { type: 'test_running', label: `${t.bannerIntegrationTest}${t.bannerTestGeneratingCode}`, startedAt: Date.now(), progress: null }]
     })
     genCodeProgressRef.current = { done: 0, total: 0, startMs: Date.now() }
 
@@ -1065,6 +1089,7 @@ export default function TaskDetail() {
           )
         )
         let newLabel: string | null = null
+        let newProgress: PhaseCount | undefined
         for (const line of chunk.split('\n')) {
           const progressMatch = line.match(/^\[XOLVIEN_PROGRESS\] (\d+)\/(\d+) elapsed_ms=(\d+) eta_ms=(\d+)/)
           if (progressMatch) {
@@ -1074,15 +1099,18 @@ export default function TaskDetail() {
             genCodeProgressRef.current = { done, total, startMs: genCodeProgressRef.current.startMs }
             const etaRawCode = etaMs > 0 ? Math.ceil(etaMs / 1000) : null
             newLabel = t.progressGenCode(done, total, etaRawCode !== null ? fmtHms(etaRawCode) : null)
+            newProgress = { done, total }
           }
         }
         if (!newLabel) {
           if (/\[ITEST\] (Running tests:|テストを実行しています|Re-running tests|テストを再実行しています)/.test(chunk)) {
             testCountRef.current = { passed: 0, failed: 0 }
-            newLabel = t.progressIntegration(0, 0)
+            newLabel = t.progressIntegration(0, plannedTotal, 0)
+            newProgress = { done: 0, total: plannedTotal }
           } else if (/\[ITEST\] (Auto-fix|自動修正)/.test(chunk)) {
             const m = chunk.match(/(?:Auto-fix|自動修正) \((\d+)\/(\d+)\)/)
             newLabel = m ? t.autoFixing(Number(m[1]), Number(m[2])) : t.autoFix
+            newProgress = null
           } else {
             let updated = false
             for (const line of chunk.split('\n')) {
@@ -1094,7 +1122,8 @@ export default function TaskDetail() {
             }
             if (updated) {
               const { passed, failed } = testCountRef.current
-              newLabel = t.progressIntegration(passed + failed, failed)
+              newLabel = t.progressIntegration(passed + failed, plannedTotal, failed)
+              newProgress = { done: passed + failed, total: plannedTotal }
             }
           }
         }
@@ -1102,7 +1131,7 @@ export default function TaskDetail() {
           setTestPhaseLabel(newLabel)
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current && e.type === 'test_running'
-              ? { ...e, label: newLabel! }
+              ? { ...e, label: newLabel!, progress: newProgress !== undefined ? newProgress : e.progress }
               : e
           ))
         }
@@ -1159,9 +1188,10 @@ export default function TaskDetail() {
     if (!confirmedPrompt || task?.status !== 'idle') return
     setGeneratingTestCases(true)
     setTcGenLabel(null)
+    setTcGenProgress(null)
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'test_cases_generating' }]
+      return [...prev, { type: 'test_cases_generating', startedAt: Date.now() }]
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
@@ -1181,6 +1211,7 @@ export default function TaskDetail() {
             const done = Number(m[1]), total = Number(m[2]), elapsedMs = Number(m[3])
             const etaRaw = done > 0 && total > done ? Math.ceil((elapsedMs / done) * (total - done) / 1000) : null
             setTcGenLabel(t.progressGenTC(done, total, etaRaw !== null ? fmtHms(etaRaw) : null))
+            setTcGenProgress({ done, total })
           }
         }
       },
@@ -1226,9 +1257,10 @@ export default function TaskDetail() {
     if (!confirmedPrompt || task?.status !== 'idle') return
     setGeneratingTestCases(true)
     setTcGenLabel(null)
+    setTcGenProgress(null)
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'integration_test_cases_generating' }]
+      return [...prev, { type: 'integration_test_cases_generating', startedAt: Date.now() }]
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
@@ -1248,6 +1280,7 @@ export default function TaskDetail() {
             const done = Number(m[1]), total = Number(m[2]), elapsedMs = Number(m[3])
             const etaRaw = done > 0 && total > done ? Math.ceil((elapsedMs / done) * (total - done) / 1000) : null
             setTcGenLabel(t.progressGenTC(done, total, etaRaw !== null ? fmtHms(etaRaw) : null))
+            setTcGenProgress({ done, total })
           }
         }
       },
@@ -1294,6 +1327,7 @@ export default function TaskDetail() {
     setRunningTests(true)
     setRunningTestType('e2e')
     testCountRef.current = { passed: 0, failed: 0 }
+    const plannedTotal = items.length
 
     setChatEntries(prev => prev.map(e =>
       e.type === 'e2e_test_cases_ready' && !e.approved ? { ...e, approved: true } : e
@@ -1301,7 +1335,7 @@ export default function TaskDetail() {
 
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'test_running', label: `${t.bannerE2ETest}${t.bannerTestGeneratingCode}` }]
+      return [...prev, { type: 'test_running', label: `${t.bannerE2ETest}${t.bannerTestGeneratingCode}`, startedAt: Date.now(), progress: null }]
     })
     genCodeProgressRef.current = { done: 0, total: 0, startMs: Date.now() }
 
@@ -1321,6 +1355,7 @@ export default function TaskDetail() {
           )
         )
         let newLabel: string | null = null
+        let newProgress: PhaseCount | undefined
         for (const line of chunk.split('\n')) {
           const progressMatch = line.match(/^\[XOLVIEN_PROGRESS\] (\d+)\/(\d+) elapsed_ms=(\d+) eta_ms=(\d+)/)
           if (progressMatch) {
@@ -1330,15 +1365,18 @@ export default function TaskDetail() {
             genCodeProgressRef.current = { done, total, startMs: genCodeProgressRef.current.startMs }
             const etaRawCode = etaMs > 0 ? Math.ceil(etaMs / 1000) : null
             newLabel = t.progressGenCode(done, total, etaRawCode !== null ? fmtHms(etaRawCode) : null)
+            newProgress = { done, total }
           }
         }
         if (!newLabel) {
           if (/\[E2E\] (Running tests:|テストを実行しています|Re-running tests|テストを再実行しています)/.test(chunk)) {
             testCountRef.current = { passed: 0, failed: 0 }
-            newLabel = t.progressE2E(0, 0)
+            newLabel = t.progressE2E(0, plannedTotal, 0)
+            newProgress = { done: 0, total: plannedTotal }
           } else if (/\[E2E\] (Auto-fix|自動修正)/.test(chunk)) {
             const m = chunk.match(/(?:Auto-fix|自動修正) \((\d+)\/(\d+)\)/)
             newLabel = m ? t.autoFixing(Number(m[1]), Number(m[2])) : t.autoFix
+            newProgress = null
           } else {
             let updated = false
             for (const line of chunk.split('\n')) {
@@ -1350,7 +1388,8 @@ export default function TaskDetail() {
             }
             if (updated) {
               const { passed, failed } = testCountRef.current
-              newLabel = t.progressE2E(passed + failed, failed)
+              newLabel = t.progressE2E(passed + failed, plannedTotal, failed)
+              newProgress = { done: passed + failed, total: plannedTotal }
             }
           }
         }
@@ -1358,7 +1397,7 @@ export default function TaskDetail() {
           setTestPhaseLabel(newLabel)
           setChatEntries(prev => prev.map((e, i) =>
             i === streamingEntryIndexRef.current && e.type === 'test_running'
-              ? { ...e, label: newLabel! }
+              ? { ...e, label: newLabel!, progress: newProgress !== undefined ? newProgress : e.progress }
               : e
           ))
         }
@@ -1415,9 +1454,10 @@ export default function TaskDetail() {
     if (!confirmedPrompt || task?.status !== 'idle') return
     setGeneratingTestCases(true)
     setTcGenLabel(null)
+    setTcGenProgress(null)
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'e2e_test_cases_generating' }]
+      return [...prev, { type: 'e2e_test_cases_generating', startedAt: Date.now() }]
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
@@ -1437,6 +1477,7 @@ export default function TaskDetail() {
             const done = Number(m[1]), total = Number(m[2]), elapsedMs = Number(m[3])
             const etaRaw = done > 0 && total > done ? Math.ceil((elapsedMs / done) * (total - done) / 1000) : null
             setTcGenLabel(t.progressGenTC(done, total, etaRaw !== null ? fmtHms(etaRaw) : null))
+            setTcGenProgress({ done, total })
           }
         }
       },
@@ -1505,7 +1546,7 @@ export default function TaskDetail() {
     ))
     setChatEntries(prev => {
       streamingEntryIndexRef.current = prev.length
-      return [...prev, { type: 'test_cases_generating' }]
+      return [...prev, { type: 'test_cases_generating', startedAt: Date.now() }]
     })
     streamKeyRef.current += 1
     const tcStreamKey = `stream-${streamKeyRef.current}`
@@ -1527,6 +1568,7 @@ export default function TaskDetail() {
             const done = Number(m[1]), total = Number(m[2]), elapsedMs = Number(m[3])
             const etaRaw = done > 0 && total > done ? Math.ceil((elapsedMs / done) * (total - done) / 1000) : null
             setTcGenLabel(t.progressGenTC(done, total, etaRaw !== null ? fmtHms(etaRaw) : null))
+            setTcGenProgress({ done, total })
           }
         }
       },
@@ -1683,7 +1725,7 @@ export default function TaskDetail() {
             whiteSpace: 'pre-wrap', lineHeight: 1.6,
           }}>
             <span style={{ fontSize: '0.72rem', color: '#6366f1', marginBottom: '4px', display: 'block', fontWeight: 600 }}>{t.claudeLabel}</span>
-            {t.thinking}
+            <PhaseProgress label={t.thinking} startedAt={entry.startedAt} flow="clarify" />
           </div>
         )
       }
@@ -1695,8 +1737,7 @@ export default function TaskDetail() {
             padding: '10px 12px', fontSize: '0.82rem', color: '#94a3b8',
             display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-
-            {t.generatingPrompt}
+            <PhaseProgress label={t.generatingPrompt} startedAt={entry.startedAt} flow="generate_prompt" />
           </div>
         )
 
@@ -1725,8 +1766,7 @@ export default function TaskDetail() {
             padding: '10px 12px', fontSize: '0.82rem', color: '#93c5fd',
             display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-
-            {t.implementationRunning}
+            <PhaseProgress label={t.implementationRunning} startedAt={entry.startedAt} flow="execute" color="#93c5fd" />
           </div>
         )
 
@@ -1748,7 +1788,7 @@ export default function TaskDetail() {
             padding: '10px 12px', fontSize: '0.82rem', color: '#94a3b8',
             display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-            {tcGenLabel ?? t.generatingTestCasesMsg}
+            <PhaseProgress label={tcGenLabel ?? t.generatingTestCasesMsg} startedAt={entry.startedAt} progress={tcGenProgress} />
           </div>
         )
 
@@ -1805,7 +1845,7 @@ export default function TaskDetail() {
             padding: '10px 12px', fontSize: '0.82rem', color: '#94a3b8',
             display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-            {tcGenLabel ?? t.generatingIntegrationTC}
+            <PhaseProgress label={tcGenLabel ?? t.generatingIntegrationTC} startedAt={entry.startedAt} progress={tcGenProgress} />
           </div>
         )
 
@@ -1862,7 +1902,7 @@ export default function TaskDetail() {
             padding: '10px 12px', fontSize: '0.82rem', color: '#94a3b8',
             display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-            {tcGenLabel ?? t.generatingE2ETC}
+            <PhaseProgress label={tcGenLabel ?? t.generatingE2ETC} startedAt={entry.startedAt} progress={tcGenProgress} />
           </div>
         )
 
@@ -1919,8 +1959,7 @@ export default function TaskDetail() {
             padding: '10px 12px', fontSize: '0.82rem', color: '#93c5fd',
             display: 'flex', alignItems: 'center', gap: '8px',
           }}>
-
-            {entry.label}
+            <PhaseProgress label={entry.label} startedAt={entry.startedAt} progress={entry.progress} color="#93c5fd" />
           </div>
         )
 

@@ -194,14 +194,22 @@ export const en = {
   confirmRequirements: 'Confirm Requirements',
   emptyState: 'Enter instructions to get started',
 
-  progressRunning: (total: number, failed: number) =>
-    failed > 0 ? `Running tests (${total} done / ${failed} failed)` : `Running tests (${total} done)`,
-  progressIntegration: (total: number, failed: number) =>
-    failed > 0 ? `Running integration tests (${total} done / ${failed} failed)` : `Running integration tests (${total} done)`,
-  progressE2E: (total: number, failed: number) =>
-    failed > 0 ? `Running E2E tests (${total} done / ${failed} failed)` : `Running E2E tests (${total} done)`,
+  progressRunning: (done: number, total: number, failed: number) => {
+    const count = total > 0 ? `${done} / ${total} complete` : `${done} complete`
+    return failed > 0 ? `Running tests: ${count} (${failed} failed)` : `Running tests: ${count}`
+  },
+  progressIntegration: (done: number, total: number, failed: number) => {
+    const count = total > 0 ? `${done} / ${total} complete` : `${done} complete`
+    return failed > 0 ? `Running integration tests: ${count} (${failed} failed)` : `Running integration tests: ${count}`
+  },
+  progressE2E: (done: number, total: number, failed: number) => {
+    const count = total > 0 ? `${done} / ${total} complete` : `${done} complete`
+    return failed > 0 ? `Running E2E tests: ${count} (${failed} failed)` : `Running E2E tests: ${count}`
+  },
   autoFixing: (n: number, total: number) => `Auto-fixing ${n}/${total}`,
   autoFix: 'Auto-fixing',
+  phaseElapsed: (hms: string) => `${hms} elapsed`,
+  phaseRemaining: (hms: string) => `~${hms} remaining`,
 
   sessionRestoreError: 'Session restore error: ',
   clarifyError: 'Clarify error: ',

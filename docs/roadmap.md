@@ -53,7 +53,7 @@ Auto-generate structured documents at each phase transition (no button press). D
 | # | Item | Summary |
 |---|------|---------|
 | 4.1 | **Left-Pane Activity Log (persistent file logging)** ✅ Done (2026-07-05) | Everything the left pane receives — raw `stream-json` lines, `[SYSTEM]`/`[GIT]` headers, terminal `[[XOLVIEN_ERROR:CODE]]` sentinels — is mirrored verbatim to host files, one file per streamed execution at `backend/logs/tasks/{task_id}/{flow}_{YYYYMMDD_HHMMSS}.log` (flow: execute / clarify / generate_prompt / test flows / git_push), format `[{ISO8601}] {line}`. Implemented at the API layer: all streaming endpoints route through a shared `_logged_stream()` wrapper writing via `aiofiles` (`services/activity_log.py`) without blocking the stream; keepalive lines are filtered; write failures disable logging but never break the stream. `backend/logs/` was already git-ignored and reaches the host via the existing `./backend:/app` bind mount. No UI change. |
-| 4.2 | **Progress Indicator Improvements** | Replace hourglasses/spinners/fixed messages with real progress: "XX / YY complete" (e.g. `Running tests: 8 / 12 complete`), estimated remaining time from past run durations, indeterminate bar only where granular events are impossible (e.g. code generation). |
+| 4.2 | **Progress Indicator Improvements** ✅ Done (2026-07-05) | Every busy chat card now shows a `PhaseProgress` line: label + live elapsed time + estimated remaining + a progress bar. Test execution shows real counts (`Running tests: 8 / 12 complete`, denominator = approved test cases); test-case/code generation keeps its `done / total` + ETA. Phases with no granular events (clarify / prompt generation / implementation) estimate remaining time from the **median of the last 10 runs of that phase** (localStorage, per browser; `services/phaseHistory.ts`) with a time-based bar, falling back to an indeterminate sliding bar on the first run. See spec §8.4. |
 
 ### Sprint 5 — GitHub workflow automation
 
@@ -76,6 +76,7 @@ Newest first. Full change notes are in `changelog.md`.
 
 ### 2026-07-05 (session 8)
 
+- **Sprint 4.2: Progress indicator improvements** — New `PhaseProgress` component on every busy chat card: live elapsed time, estimated remaining, and a progress bar (real counts → time-based estimate from the median of past runs via localStorage → indeterminate). Test execution now shows `done / total` with the approved test-case count as denominator. Verified in the browser (Playwright): first clarify run showed elapsed + indeterminate bar; the second showed `経過 0:09 ・ 残り約 0:09` with an estimate bar.
 - **Sprint 4.1: Left-pane activity log persisted to host files** — New `services/activity_log.py` + a shared `_logged_stream()` wrapper in `api/instructions.py` (and `git/push` in `api/tasks.py`) mirror every streamed chunk the left pane receives into `backend/logs/tasks/{task_id}/{flow}_{YYYYMMDD_HHMMSS}.log`, each line timestamped `[{ISO8601}] {line}`; keepalives filtered, error sentinels included, write failures never break the stream. Verified with a real execute run (206 lines logged end-to-end).
 
 ### 2026-07-02 (session 7)
