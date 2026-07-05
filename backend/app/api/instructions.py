@@ -11,10 +11,42 @@ from app.models.instruction import Instruction, InstructionStatus
 from app.models.test_run import TestType
 from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest, RunIntegrationTestsRequest, RunE2ETestsRequest
 from app.api.auth import verify_token
+from app.services.activity_log import ActivityLog
 from app.services.claude_service import get_claude_service
 from app.errors import XolvienError, classify_exception, error_sentinel_line
 
 router = APIRouter(prefix="/api/v1/tasks/{task_id}/instructions", tags=["instructions"])
+
+
+def _logged_stream(task_id: int, flow: str, source) -> StreamingResponse:
+    """
+    Wrap a Claude flow's async generator into a StreamingResponse, mirroring
+    every chunk the left pane receives — including the terminal error
+    sentinel — into a per-execution activity log file (roadmap 4.1).
+    """
+
+    async def generate():
+        activity_log = ActivityLog(task_id, flow)
+        try:
+            async for chunk in source:
+                await activity_log.write(chunk)
+                yield chunk
+        except Exception as e:
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            line = error_sentinel_line(code, str(e))
+            await activity_log.write(line)
+            yield line
+        finally:
+            await activity_log.close()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 @router.post("", response_model=InstructionResponse, status_code=201)
@@ -68,27 +100,11 @@ async def execute_instruction_stream(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Get Claude Code service
     claude_service = get_claude_service()
-
-    # Execute instruction with streaming
-    async def generate():
-        try:
-            async for chunk in claude_service.execute_instruction(
-                db, task_id, instruction_data.content
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "no-cache",
-        },
+    return _logged_stream(
+        task_id,
+        "execute",
+        claude_service.execute_instruction(db, task_id, instruction_data.content),
     )
 
 
@@ -135,21 +151,12 @@ async def generate_prompt_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.generate_prompt(
-                db, task_id, data.content, data.feedback or "", lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "generate_prompt",
+        claude_service.generate_prompt(
+            db, task_id, data.content, data.feedback or "", lang=data.lang
+        ),
     )
 
 
@@ -171,21 +178,12 @@ async def clarify_requirements_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.clarify_requirements(
-                db, task_id, data.instruction, [m.model_dump() for m in data.history], data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "clarify",
+        claude_service.clarify_requirements(
+            db, task_id, data.instruction, [m.model_dump() for m in data.history], data.lang
+        ),
     )
 
 
@@ -207,21 +205,12 @@ async def generate_test_cases_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.generate_test_cases(
-                db, task_id, data.implementation_prompt, lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "generate_test_cases",
+        claude_service.generate_test_cases(
+            db, task_id, data.implementation_prompt, lang=data.lang
+        ),
     )
 
 
@@ -239,21 +228,12 @@ async def generate_integration_test_cases_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.generate_test_cases(
-                db, task_id, data.implementation_prompt, TestType.INTEGRATION, lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "generate_integration_test_cases",
+        claude_service.generate_test_cases(
+            db, task_id, data.implementation_prompt, TestType.INTEGRATION, lang=data.lang
+        ),
     )
 
 
@@ -274,21 +254,10 @@ async def run_unit_tests_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.run_unit_tests(
-                db, task_id, data.implementation_prompt, lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "run_unit_tests",
+        claude_service.run_unit_tests(db, task_id, data.implementation_prompt, lang=data.lang),
     )
 
 
@@ -309,21 +278,12 @@ async def run_integration_tests_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.run_integration_tests(
-                db, task_id, data.implementation_prompt, lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "run_integration_tests",
+        claude_service.run_integration_tests(
+            db, task_id, data.implementation_prompt, lang=data.lang
+        ),
     )
 
 
@@ -341,21 +301,12 @@ async def generate_e2e_test_cases_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.generate_test_cases(
-                db, task_id, data.implementation_prompt, TestType.E2E, lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "generate_e2e_test_cases",
+        claude_service.generate_test_cases(
+            db, task_id, data.implementation_prompt, TestType.E2E, lang=data.lang
+        ),
     )
 
 
@@ -376,21 +327,10 @@ async def run_e2e_tests_stream(
         raise HTTPException(status_code=404, detail="Task not found")
 
     claude_service = get_claude_service()
-
-    async def generate():
-        try:
-            async for chunk in claude_service.run_e2e_tests(
-                db, task_id, data.implementation_prompt, lang=data.lang
-            ):
-                yield chunk
-        except Exception as e:
-            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-            yield error_sentinel_line(code, str(e))
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"},
+    return _logged_stream(
+        task_id,
+        "run_e2e_tests",
+        claude_service.run_e2e_tests(db, task_id, data.implementation_prompt, lang=data.lang),
     )
 
 

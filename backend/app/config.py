@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Repository-level uploads (spec/design docs) persist here, independent of
     # task containers. Referenced repeatedly across a project's fix-tasks.
     upload_data_path: str = "/tmp/xolvien/uploads"
+    # Left-pane activity logs (raw stream-json) are written here, one file per
+    # streamed execution. Relative paths resolve against the backend cwd, so
+    # the default lands in backend/logs/ (bind-mounted in docker compose).
+    activity_log_path: str = "logs"
 
     # Claude Code (no longer used; Claude Code CLI is used instead)
     anthropic_api_key: str = ""

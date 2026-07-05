@@ -2,6 +2,58 @@
 
 ---
 
+## 2026-07-05
+
+### Sprint 4.1 — Left-pane activity log persisted to host files
+
+Everything the left pane shows (the raw `stream-json` conversation with Claude)
+is now also written to host log files for later review. Since the 2026-06-28
+raw-stream rework, all streamed flows pass through the streaming endpoints
+unmodified, so logging was implemented **at the API layer** — the file is
+guaranteed to match exactly what the left pane received, including the
+`[SYSTEM]`/`[GIT]` header lines and the terminal `[[XOLVIEN_ERROR:CODE]]`
+sentinel (which service-level logging would have missed).
+
+**Backend:**
+- New `services/activity_log.py` — `ActivityLog(task_id, flow)` appends to
+  `{activity_log_path}/tasks/{task_id}/{flow}_{YYYYMMDD_HHMMSS}.log`, one line
+  per stream line, each prefixed `[{ISO8601 with tz, ms}] `. Partial-line
+  chunks are buffered until complete; `{"type":"_xolvien_keepalive"}` lines are
+  filtered (the left pane drops them too); the file/directory is created
+  lazily on first write (no empty files); any filesystem error disables
+  logging for the rest of the run and never breaks the user-facing stream.
+  Writes via `aiofiles` (non-blocking).
+- `config.py`: `activity_log_path` (default `logs`, resolved against the
+  backend cwd → `backend/logs/`). Already covered by `.gitignore` (`logs/`)
+  and already host-persisted in compose via the existing `./backend:/app`
+  bind mount — no compose change needed.
+- `api/instructions.py`: the nine streaming endpoints' identical
+  `generate()` + `StreamingResponse` blocks were deduplicated into a shared
+  `_logged_stream(task_id, flow, source)` helper that mirrors every chunk into
+  the `ActivityLog` while yielding it (flows: `execute`, `clarify`,
+  `generate_prompt`, `generate_test_cases`, `generate_integration_test_cases`,
+  `generate_e2e_test_cases`, `run_unit_tests`, `run_integration_tests`,
+  `run_e2e_tests`). All streaming responses now also send
+  `X-Content-Type-Options: nosniff` (previously execute-stream only).
+- `api/tasks.py`: `git/push` streaming wrapped the same way (flow `git_push`).
+
+**Deviation from the original 4.1 note:** filenames are
+`{flow}_{YYYYMMDD_HHMMSS}.log`, not `instruction_{instruction_id}_...` — the
+instruction row is created inside `execute_instruction()` after the stream
+starts, so the ID isn't known at the API layer, and per-flow naming covers all
+ten streamed flows (the original note predates the raw-stream rework and
+covered only execute).
+
+**Verified:** unit tests for chunk buffering across split lines, keepalive
+filtering, timestamp format, unwritable-directory tolerance, and no-file-on-
+empty-stream; then a real `POST /execute-stream` run against a live task
+container — 206 lines logged end-to-end (`[SYSTEM]` header → `_xolvien_input`
+echo → raw stream-json → `[GIT]` commit → `[SYSTEM] Done`), zero keepalives in
+the file. **Not verified:** the test-flow and git-push paths against a real
+run (same wrapper code path as execute).
+
+---
+
 ## 2026-07-02
 
 ### Sprint 2 completed — binary uploads converted to Markdown server-side

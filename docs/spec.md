@@ -387,31 +387,32 @@ Each document is stored as a YAML string conforming to a fixed schema per `doc_t
 
 ## 7. Left-Pane Activity Log
 
-The left pane is a **console.log-equivalent raw view**: Claude Code CLI's `stream-json` output flows through **unmodified** (no `[Thinking]`/`[Tool:]`/`[Result]` reformatting). This raw activity is (planned to be) written to a host log file for later review.
+The left pane is a **console.log-equivalent raw view**: Claude Code CLI's `stream-json` output flows through **unmodified** (no `[Thinking]`/`[Tool:]`/`[Result]` reformatting). This raw activity is also written to a host log file for later review (Sprint 4.1, implemented 2026-07-05).
 
 ### 7.1 What is shown / logged
 
 Everything streamed during a Claude run, verbatim, as raw `stream-json` lines:
 - `{"type":"_xolvien_input","prompt":...}` — the full prompt sent to Claude (input echo)
 - `{"type":"system",...}`, `{"type":"stream_event",...}` (thinking/text/tool deltas), `{"type":"user",...}` tool results — Claude's raw output
-- `{"type":"_xolvien_keepalive"}` — internal stream keepalive (filtered from the display, every 15s)
+- `{"type":"_xolvien_keepalive"}` — internal stream keepalive (filtered from the display, every 15s; also filtered from the log file)
+- `[SYSTEM]`/`[GIT]` header lines and the terminal `[[XOLVIEN_ERROR:CODE]]` sentinel
 
 The same raw stream is parsed on the frontend (`createStreamJsonRouter`) only to reconstruct the text the **right pane** needs (clarify question / `PROMPT_READY` / generated prompt); the left pane itself is never reformatted.
 
-Persistent file logging is planned (Sprint 4.1): one file per run, each line `[{ISO8601 timestamp}] {raw line}`.
-
 ### 7.2 Storage
 
-- Log files are written to `backend/logs/tasks/{task_id}/` on the host.
-- One file per instruction execution: `instruction_{instruction_id}_{YYYYMMDD_HHMMSS}.log`
+- Log files are written to `{activity_log_path}/tasks/{task_id}/` — default `logs` relative to the backend cwd, i.e. `backend/logs/tasks/{task_id}/` on the host.
+- One file per streamed execution, named by flow: `{flow}_{YYYYMMDD_HHMMSS}.log` where flow is one of `execute`, `clarify`, `generate_prompt`, `generate_test_cases`, `generate_integration_test_cases`, `generate_e2e_test_cases`, `run_unit_tests`, `run_integration_tests`, `run_e2e_tests`, `git_push`.
+- Each completed stream line becomes one file line: `[{ISO8601 timestamp}] {raw line}`.
 - Files are never deleted automatically.
-- `backend/logs/` is bind-mounted from the host into the backend process so logs persist independently of container lifecycle.
-- `backend/logs/` is listed in `.gitignore`.
+- In `docker compose --profile full`, `./backend` is bind-mounted at `/app`, so `backend/logs/` persists on the host independently of container lifecycle.
+- `logs/` is covered by `.gitignore`.
 
 ### 7.3 Implementation
 
-- `ClaudeCodeService.execute_instruction()` opens the log file before streaming starts and appends each yielded line using `aiofiles` (non-blocking).
-- The log directory is created automatically if it does not exist.
+- `services/activity_log.py` — `ActivityLog(task_id, flow)`: buffers partial-line chunks and appends completed lines with `aiofiles` (non-blocking), creating the directory on first write; no file is created for an empty stream. Any filesystem error disables logging for the rest of the run without breaking the user-facing stream.
+- `api/instructions.py` — all nine streaming endpoints route through a shared `_logged_stream()` helper that mirrors every chunk (including the terminal error sentinel) into the `ActivityLog` while yielding it to the client. `api/tasks.py` does the same for `git/push`.
+- Logging at the API layer guarantees the file matches exactly what the left pane received.
 
 ---
 
@@ -535,7 +536,7 @@ backend/
 │   └── {user_id}/               # User-uploaded custom templates
 └── logs/
     └── tasks/
-        └── {task_id}/           # Left-pane activity logs (host-side, persisted; planned)
+        └── {task_id}/           # Left-pane activity logs (host-side, persisted — see §7)
 
 Repository uploads are NOT under backend/; they live on the persistent
 `task_data` volume at /data/uploads/repos/{repository_id}/.
@@ -545,7 +546,7 @@ Repository uploads are NOT under backend/; they live on the persistent
 
 | Method | Description |
 |---|---|
-| `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. Writes each line to the activity log file via `aiofiles`. |
+| `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. (Activity-log file writing happens at the API layer — see §7.3.) |
 | `clarify_requirements()` | Requirement clarification Q&A. Asks one question at a time, each with a bulleted `Options:` / `選択肢:` block. Continues until the user clicks "Skip to generate prompt". |
 | `generate_prompt()` | Converts a brief instruction into an optimized prompt. |
 | `generate_test_cases()` | Generates UNIT (`TC-NNN`), INTEGRATION (`ITC-NNN`), or E2E (`E2E-NNN`) test cases based on `test_type`. Uses batch generation via `--output-format json` + `--resume` (10 cases per call). Yields `[XOLVIEN_PROGRESS] done/total elapsed_ms=N eta_ms=0` after each batch. |
