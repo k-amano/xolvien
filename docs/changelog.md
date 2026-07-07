@@ -4,6 +4,39 @@
 
 ## 2026-07-07
 
+### Document format v1.1 — deliverable-grade extensions
+
+Applied the user's improvement proposal (`docs/upload/document-format-improvements.md`,
+based on government/enterprise deliverable requirements) to the common
+document format. All changes are optional fields or type widenings —
+**every v1 document stays valid** (`format_version` remains 1); verified
+against the step-3.2 generated document and the proposal's `sample.yaml`.
+
+- **Tables (the must-haves):** cells may now be merge objects
+  `{value, colspan?, rowspan?}` (rows under a rowspan omit the spanned cell);
+  `header` may be a list of header rows for multi-tier headers (the last,
+  most granular row defines the grid width); `row_header_cols: N` styles the
+  leftmost columns as row headers. The code-side width check became
+  colspan-aware: a row may be narrower than the grid (rowspan continuation)
+  but never wider.
+- **Deliverable metadata:** optional top-level `cover` (subtitle, version,
+  date, organization, department, author, reviewers, approver) and
+  `revisions` (version/date/summary/author). Auto-generation omits both —
+  the prompt forbids inventing authors/approvers; they are user/platform
+  metadata.
+- **Layout & new blocks:** `page_break_before` on any section; `code` block
+  (language/caption/content) and `note` block (info/warning/important);
+  `image` gains `width` and `align`.
+- `document-format.md` updated to v1.1 (the JSON Schema block is now
+  generated from `document_format.py`'s schema so spec and code cannot
+  drift); `document_format.py` schema + width check updated; the docgen
+  prompt (`_FORMAT_RULES`) teaches the new table syntax and blocks.
+
+**Verified:** v1 backward compat (old example + the real generated
+requirements doc), the proposal's `sample.yaml` and the spec's §5 example
+validate; colspan overflow, bad revision entries, bad `align`, and unknown
+`cover` fields are rejected; the generation prompt includes the new rules.
+
 ### Sprint 3 step 3.2 — document generation + YAML file storage
 
 All five document types are now generated as YAML (per `document-format.md`)

@@ -18,16 +18,6 @@ DOC_TYPES = [
     "test_report",
 ]
 
-_SECTION_L3 = {
-    "type": "object",
-    "required": ["title"],
-    "additionalProperties": False,
-    "properties": {
-        "title": {"type": "string", "minLength": 1},
-        "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
-    },
-}
-
 DOCUMENT_SCHEMA: dict = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -38,6 +28,8 @@ DOCUMENT_SCHEMA: dict = {
         "doc_type": {"enum": DOC_TYPES},
         "title": {"type": "string", "minLength": 1},
         "language": {"enum": ["ja", "en"]},
+        "revisions": {"$ref": "#/$defs/revisions"},
+        "cover": {"$ref": "#/$defs/cover"},
         "sections": {
             "type": "array",
             "minItems": 1,
@@ -45,12 +37,61 @@ DOCUMENT_SCHEMA: dict = {
         },
     },
     "$defs": {
+        "revisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["version", "date", "summary"],
+                "additionalProperties": False,
+                "properties": {
+                    "version": {"type": "string"},
+                    "date": {"type": "string"},
+                    "author": {"type": "string"},
+                    "summary": {"type": "string"},
+                },
+            },
+        },
+        "cover": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "subtitle": {"type": "string"},
+                "version": {"type": "string"},
+                "date": {"type": "string"},
+                "organization": {"type": "string"},
+                "department": {"type": "string"},
+                "author": {"type": "string"},
+                "reviewers": {"type": "array", "items": {"type": "string"}},
+                "approver": {"type": "string"},
+            },
+        },
+        "cellValue": {
+            "oneOf": [
+                {"type": ["string", "number", "boolean", "null"]},
+                {
+                    "type": "object",
+                    "required": ["value"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "value": {"type": ["string", "number", "boolean", "null"]},
+                        "colspan": {"type": "integer", "minimum": 1},
+                        "rowspan": {"type": "integer", "minimum": 1},
+                    },
+                },
+            ]
+        },
+        "headerRow": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/cellValue"},
+        },
         "sectionL1": {
             "type": "object",
             "required": ["title"],
             "additionalProperties": False,
             "properties": {
                 "title": {"type": "string", "minLength": 1},
+                "page_break_before": {"type": "boolean"},
                 "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
                 "sections": {"type": "array", "items": {"$ref": "#/$defs/sectionL2"}},
             },
@@ -61,11 +102,21 @@ DOCUMENT_SCHEMA: dict = {
             "additionalProperties": False,
             "properties": {
                 "title": {"type": "string", "minLength": 1},
+                "page_break_before": {"type": "boolean"},
                 "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
                 "sections": {"type": "array", "items": {"$ref": "#/$defs/sectionL3"}},
             },
         },
-        "sectionL3": _SECTION_L3,
+        "sectionL3": {
+            "type": "object",
+            "required": ["title"],
+            "additionalProperties": False,
+            "properties": {
+                "title": {"type": "string", "minLength": 1},
+                "page_break_before": {"type": "boolean"},
+                "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}},
+            },
+        },
         "block": {
             "oneOf": [
                 {"$ref": "#/$defs/textBlock"},
@@ -73,6 +124,8 @@ DOCUMENT_SCHEMA: dict = {
                 {"$ref": "#/$defs/listBlock"},
                 {"$ref": "#/$defs/figureBlock"},
                 {"$ref": "#/$defs/imageBlock"},
+                {"$ref": "#/$defs/codeBlock"},
+                {"$ref": "#/$defs/noteBlock"},
             ]
         },
         "textBlock": {
@@ -91,12 +144,18 @@ DOCUMENT_SCHEMA: dict = {
             "properties": {
                 "type": {"const": "table"},
                 "caption": {"type": "string"},
-                "header": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                "header": {
+                    "oneOf": [
+                        {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                        {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/headerRow"}},
+                    ]
+                },
+                "row_header_cols": {"type": "integer", "minimum": 0},
                 "rows": {
                     "type": "array",
                     "items": {
                         "type": "array",
-                        "items": {"type": ["string", "number", "boolean", "null"]},
+                        "items": {"$ref": "#/$defs/cellValue"},
                     },
                 },
             },
@@ -163,6 +222,29 @@ DOCUMENT_SCHEMA: dict = {
                 "path": {"type": "string", "minLength": 1},
                 "caption": {"type": "string"},
                 "alt": {"type": "string"},
+                "width": {"type": "string"},
+                "align": {"enum": ["left", "center", "right"]},
+            },
+        },
+        "codeBlock": {
+            "type": "object",
+            "required": ["type", "content"],
+            "additionalProperties": False,
+            "properties": {
+                "type": {"const": "code"},
+                "language": {"type": "string"},
+                "caption": {"type": "string"},
+                "content": {"type": "string", "minLength": 1},
+            },
+        },
+        "noteBlock": {
+            "type": "object",
+            "required": ["type", "content"],
+            "additionalProperties": False,
+            "properties": {
+                "type": {"const": "note"},
+                "style": {"enum": ["info", "warning", "important"]},
+                "content": {"type": "string", "minLength": 1},
             },
         },
     },
@@ -206,16 +288,37 @@ def validate_document(data: Any) -> List[str]:
     return errors
 
 
+def _effective_width(row: list) -> int:
+    """Number of columns a row of cells occupies (colspan-aware)."""
+    total = 0
+    for cell in row:
+        total += cell.get("colspan", 1) if isinstance(cell, dict) else 1
+    return total
+
+
+def _table_column_count(header: list) -> int:
+    """
+    Column count of a table. For multi-row headers the LAST row is the most
+    granular and defines the grid width.
+    """
+    if header and isinstance(header[0], list):
+        return _effective_width(header[-1])
+    return len(header)
+
+
 def _check_table_widths(sections: list, path: str, errors: List[str]) -> None:
+    # Rows may be NARROWER than the grid (rowspan continuation rows omit the
+    # spanned cells); occupying MORE columns than the grid is always an error.
     for si, section in enumerate(sections):
         for bi, block in enumerate(section.get("blocks") or []):
             if block.get("type") != "table":
                 continue
-            width = len(block["header"])
+            width = _table_column_count(block["header"])
             for ri, row in enumerate(block["rows"]):
-                if len(row) > width:
+                if _effective_width(row) > width:
                     errors.append(
-                        f"{path}/{si}/blocks/{bi}/rows/{ri}: row has {len(row)} cells "
-                        f"but the header defines {width} columns"
+                        f"{path}/{si}/blocks/{bi}/rows/{ri}: row occupies "
+                        f"{_effective_width(row)} columns (colspan included) but the "
+                        f"table has {width} columns"
                     )
         _check_table_widths(section.get("sections") or [], f"{path}/{si}/sections", errors)

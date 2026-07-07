@@ -74,6 +74,9 @@ logs/
 # Generated documents (Sprint 3)
 backend/documents/
 
+# Local working files (user-provided drafts/proposals, not tracked)
+docs/upload/
+
 # Task data
 /data/
 /tmp/

@@ -74,13 +74,14 @@ title: "<document title>"
 language: {lang}
 sections:            # chapters; nesting depth at most 3 (1. / 1.1 / 1.1.1)
   - title: "<chapter title WITHOUT a number>"
-    blocks:          # ordered content; any mix of the 5 block types below
+    page_break_before: true   # optional; start this chapter on a new page
+    blocks:          # ordered content; any mix of the 7 block types below
       - type: text
         content: "plain text; blank line separates paragraphs; NO markdown"
       - type: table
         caption: "optional"
         header: ["col", ...]
-        rows: [["cell", ...], ...]   # scalars only; same width as header
+        rows: [["cell", ...], ...]
       - type: list
         style: bullet   # or number
         items: ["item", {text: "item", children: ["sub-item", ...]}]
@@ -91,12 +92,33 @@ sections:            # chapters; nesting depth at most 3 (1. / 1.1 / 1.1.1)
       - type: image
         path: "path relative to /workspace/repo"
         caption: "optional"
+      - type: code
+        language: "python"   # optional
+        caption: "optional"
+        content: "source code verbatim"
+      - type: note
+        style: warning   # info | warning | important
+        content: "supplementary note or caution"
     sections: [...]  # optional child sections, same shape
+
+Table details:
+- A cell is a scalar, or an object to merge cells:
+  {value: "Input", rowspan: 3} spans 3 rows downward; {value: "Basics", colspan: 2}
+  spans 2 columns. Rows under a rowspan OMIT the spanned cell entirely.
+- header may be a list of column names, or a list of rows for a 2-tier header:
+  header:
+    - [{value: "Basics", colspan: 2}, {value: "Validation", colspan: 2}]
+    - ["Name", "Type", "Constraint", "Description"]
+- row_header_cols: 1 renders the leftmost column(s) as row headers
+  (use for item-name/value tables).
+- A row must never occupy more columns than the table grid.
 
 Rules:
 - Section titles carry no numbers (numbering is added when rendering).
 - text content is plain text only — no markdown, no HTML.
 - Use image blocks ONLY for image files that actually exist in the repository.
+- Do NOT include the optional top-level cover/revisions fields — the platform
+  manages that metadata.
 - Do not invent facts; base everything on the source material provided.
 """
 
