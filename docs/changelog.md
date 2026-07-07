@@ -2,6 +2,91 @@
 
 ---
 
+## 2026-07-07
+
+### Sprint 3 step 3.2 — document generation + YAML file storage
+
+All five document types are now generated as YAML (per `document-format.md`)
+and saved to host files. The renderer is deliberately deferred (user
+decision): producing and persisting the documents comes first.
+
+**Storage decisions:**
+- Location: `{document_data_path}/tasks/{task_id}/` — default
+  `backend/documents/tasks/{task_id}/` (config `document_data_path`;
+  git-ignored; host-persisted in compose via the existing `./backend:/app`
+  mount). **Changed from the planned `task_documents` DB table** — the YAML
+  file is the deliverable itself, needs no migration, and keeps history.
+- File name: `{doc_type}_{YYYYMMDD_HHMMSS}.yaml`. Every generation is kept;
+  newest timestamp per doc_type = current version. Filesystem is the source
+  of truth.
+- Timing (background, fire-and-forget `asyncio.create_task` — never delays
+  the user's stream): `requirements` at execution start (= prompt confirmed);
+  `external_design` + `internal_design` at execution completion;
+  `specification` + `test_report` at E2E test-run completion (= all tests
+  done). Failures are logged, never surfaced into the user flow.
+
+**Backend:**
+- New `services/document_format.py` — the format's JSON Schema
+  (mirrors document-format.md §4) + `extract_yaml_document()` (last fenced
+  ```yaml block, fallback raw) + `validate_document()` (schema + row-width
+  check, max 10 errors returned for retry prompts).
+- New `services/document_service.py` — per-doc-type role/outline prompts
+  (JA/EN, chapter outlines per spec §6.2) + a compact format-rules prompt
+  block; runs Claude CLI non-streaming in the task container via a dedicated
+  docgen runner (`/tmp/xolvien_docgen_*` — cannot clobber the user-flow
+  runner's files; `claude -p --output-format text`, xolvien user, blocking
+  exec wrapped in `asyncio.to_thread`); validate → retry with error feedback
+  (3 attempts total) → save. `schedule_generation()` runs job lists
+  sequentially in the background (one extra claude process at a time).
+- `services/claude_service.py` — three trigger points (see timing above);
+  `_build_test_doc_sources()` collects test-case items + latest run per type
+  + per-case results into the specification / test-report source material.
+- New `api/documents.py` — `GET /api/v1/tasks/{task_id}/documents` (list
+  from filesystem, newest first) and `GET .../documents/{filename}` (raw
+  YAML; strict filename regex doubles as path-traversal protection).
+- `config.py`: `document_data_path` (default `documents`); `.gitignore`:
+  `backend/documents/`; deps: `jsonschema` added (+ `pyyaml` made explicit).
+
+**Verified:** unit tests for extraction (last-fence/fallback/empty),
+validation (valid doc, row-width, unknown block type), prompt builders
+(JA/EN), and app imports; then a **real end-to-end generation** against task
+13's container — the requirements doc for a small feature came back as valid
+YAML on the first attempt (10 KB, sections/tables per the outline, correctly
+grounded in the repo's existing code) and was saved; list API returned it,
+fetch API served the YAML, and a path-traversal probe got 404.
+**Not verified live:** the three in-flow triggers (requirements at execute
+start, designs at completion, spec/report at E2E completion) — they are thin
+wrappers around the verified `generate_document()`; observe on the next real
+task run.
+
+### Sprint 3 step 1 — common document YAML format specified
+
+Sprint 3 (automatic document generation) was split into six steps (see
+roadmap). Step 3.1 delivers the normative format spec, `docs/document-format.md`:
+
+- **One common format for all five doc types** (changed from the original
+  per-doc-type fixed schemas): a section tree auto-numbered at render time
+  (`1.` / `1.1` / `1.1.1`, max depth 3) whose sections hold **ordered,
+  free-order content blocks** of five kinds — `text` (plain, escaped),
+  `table` (header + scalar-cell rows, numbered caption), `list`
+  (bullet/number, nested ≤ 3), `figure` (Mermaid source; HTML renders it,
+  Excel emits preformatted source in v1), `image` (workspace-relative path,
+  snapshotted into `backend/doc_assets/` at generation so documents outlive
+  the container; missing images render a placeholder, never fail).
+- System metadata (task, generated_at) stays in the storage layer (file
+  location + timestamped name after step 3.2's file-storage decision) and is
+  passed to templates as separate `meta` context — the YAML holds content
+  only.
+- Normative JSON Schema embedded in the spec (`format_version: 1`,
+  `additionalProperties: false` everywhere); generation extracts a fenced
+  YAML block, validates, and retries with error feedback up to 2 times.
+- Per-type chapter outlines are a **prompt** concern (spec §6.2), not a
+  schema constraint — adding a doc type is a prompt-only change.
+- spec.md §6.3 rewritten to reference the new spec; roadmap Sprint 3 split
+  into ordered steps with 3.1 marked done.
+
+---
+
 ## 2026-07-05
 
 ### Sprint 4.2 — Progress indicator improvements

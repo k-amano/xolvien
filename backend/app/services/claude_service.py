@@ -16,6 +16,7 @@ from app.models.test_case_item import TestCaseItem
 from app.models.test_case_result import TestCaseResult, Verdict
 from app.services.docker_service import get_docker_service
 from app.services import document_converter
+from app.services.document_service import schedule_generation
 
 # Unified RAW stream-json runner for ALL streamed Claude flows (clarify, prompt
 # generation, test code-gen, test auto-fix, execute).
@@ -728,6 +729,13 @@ README:
             yield f"[SYSTEM] Instruction received\n"
             yield f"[SYSTEM] {instruction_content}\n\n"
 
+            # Sprint 3: the confirmed prompt IS the requirements source —
+            # generate the requirements definition document in the background.
+            schedule_generation(
+                task_id, task.container_id,
+                [("requirements", instruction_content)], "ja",
+            )
+
             # Copy repository uploads into the container and prepend a reference
             # to them so Claude reads the attached specs/designs during execution.
             uploads_section = await self._prepare_uploads(db, task, "ja")
@@ -792,6 +800,17 @@ README:
             instruction.exit_code = 0
             task.status = TaskStatus.IDLE
             await db.commit()
+
+            # Sprint 3: implementation complete — generate the external and
+            # internal design documents from the actual code (background).
+            schedule_generation(
+                task_id, task.container_id,
+                [
+                    ("external_design", instruction_content),
+                    ("internal_design", instruction_content),
+                ],
+                "ja",
+            )
 
             yield "\n[SYSTEM] Done\n"
 
@@ -2059,12 +2078,96 @@ Notes:
         task.status = TaskStatus.IDLE
         await db.commit()
 
+        # Sprint 3: E2E completion means all test phases are done — generate
+        # the specification and test report documents in the background.
+        if test_type == TestType.E2E:
+            try:
+                spec_source, report_source = await self._build_test_doc_sources(
+                    db, task_id, implementation_prompt, lang
+                )
+                schedule_generation(
+                    task_id, task.container_id,
+                    [("specification", spec_source), ("test_report", report_source)],
+                    lang,
+                )
+            except Exception:
+                pass  # document generation must never break the test flow
+
         if lang == "en":
             yield f"\n{tag} Report saved: {report_path}\n"
             yield f"\n[SYSTEM] Tests complete: {summary}\n"
         else:
             yield f"\n{tag} レポートを保存しました: {report_path}\n"
             yield f"\n[SYSTEM] テスト完了: {summary}\n"
+
+    async def _build_test_doc_sources(
+        self,
+        db: AsyncSession,
+        task_id: int,
+        implementation_prompt: str,
+        lang: str = "ja",
+    ) -> tuple[str, str]:
+        """
+        Collect DB test data into the source-material strings for the
+        specification and test report documents (Sprint 3).
+        """
+        items_q = await db.execute(
+            sa_select(TestCaseItem)
+            .where(TestCaseItem.task_id == task_id)
+            .order_by(TestCaseItem.test_type, TestCaseItem.seq_no)
+        )
+        items = items_q.scalars().all()
+
+        runs_q = await db.execute(
+            sa_select(TestRun)
+            .where(TestRun.task_id == task_id, TestRun.completed_at.isnot(None))
+            .order_by(TestRun.id)
+        )
+        latest_run_by_type: dict = {}
+        for run in runs_q.scalars().all():
+            latest_run_by_type[run.test_type] = run  # ordered by id -> last wins
+
+        run_ids = [r.id for r in latest_run_by_type.values()]
+        results_by_item: dict = {}
+        if run_ids:
+            results_q = await db.execute(
+                sa_select(TestCaseResult).where(TestCaseResult.test_run_id.in_(run_ids))
+            )
+            for r in results_q.scalars().all():
+                results_by_item[r.test_case_item_id] = r
+
+        # Specification source: the implemented behavior (prompt) + every test
+        # case at specification level (input/operation/expected).
+        spec_lines = [
+            "### Implementation prompt", "", implementation_prompt, "",
+            "### Test cases (tc_id | test item | operation | expected output)", "",
+        ]
+        for tc in items:
+            spec_lines.append(
+                f"- {tc.tc_id} | {tc.test_item} | {tc.operation or '-'} | {tc.expected_output or '-'}"
+            )
+        spec_source = "\n".join(spec_lines)
+
+        # Test report source: latest run per type + per-case verdicts.
+        report_lines = ["### Test runs (latest per type)", ""]
+        for test_type, run in latest_run_by_type.items():
+            type_name = test_type.value if hasattr(test_type, "value") else str(test_type)
+            report_lines.append(
+                f"- {type_name}: {'PASSED' if run.passed else 'FAILED'} | summary: {run.summary or '-'} "
+                f"| completed_at: {run.completed_at}"
+            )
+        report_lines += ["", "### Per-case results (tc_id | test item | expected | actual | verdict | executed_at)", ""]
+        for tc in items:
+            r = results_by_item.get(tc.id)
+            verdict = r.verdict.value if r and r.verdict else "-"
+            actual = (r.actual_output or "-") if r else "-"
+            executed = str(r.executed_at) if r else "-"
+            report_lines.append(
+                f"- {tc.tc_id} | {tc.test_item} | {tc.expected_output or '-'} | {actual} | {verdict} | {executed}"
+            )
+        report_source = "\n".join(report_lines)
+
+        return spec_source, report_source
 
     def _extract_result_for_function(
         self, output: str, function_name: str | None, tc_id: str | None = None

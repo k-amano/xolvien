@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import get_settings
 from app.errors import XolvienError, classify_exception, error_payload
-from app.api import auth, repositories, tasks, instructions, logs, test_runs, test_cases
+from app.api import auth, repositories, tasks, instructions, logs, test_runs, test_cases, documents
 
 settings = get_settings()
 
@@ -64,6 +64,7 @@ app.include_router(instructions.router)
 app.include_router(logs.router)
 app.include_router(test_runs.router)
 app.include_router(test_cases.router)
+app.include_router(documents.router)
 
 
 @app.get("/health")

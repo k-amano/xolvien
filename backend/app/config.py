@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # streamed execution. Relative paths resolve against the backend cwd, so
     # the default lands in backend/logs/ (bind-mounted in docker compose).
     activity_log_path: str = "logs"
+    # Auto-generated documents (YAML, document-format.md) are stored here, one
+    # file per generation: {path}/tasks/{task_id}/{doc_type}_{ts}.yaml
+    document_data_path: str = "documents"
 
     # Claude Code (no longer used; Claude Code CLI is used instead)
     anthropic_api_key: str = ""

@@ -323,17 +323,21 @@ Claude Code's `Read` tool rejects binary files, so binary documents are **conver
 
 ## 6. Document Generation
 
-Documents are generated automatically at each phase transition. They are stored as YAML (structured data) in the `task_documents` table and rendered into Excel or HTML via templates at download time.
+Documents are generated automatically at each phase transition. They are stored as YAML files on the host (see §6.4) and will be rendered into Excel or HTML via templates at download time (renderer planned — see roadmap Sprint 3).
+
+> **Status (2026-07-07):** generation + YAML file storage + list/fetch API are implemented; the renderer and the frontend Documents panel are not yet.
 
 ### 6.1 Document Types and Generation Timing
 
-| Document | Generated when | Source material |
+| Document | Generated when (trigger) | Source material |
 |---|---|---|
-| Requirements definition | Prompt confirmed (step 3) | Clarified Q&A, confirmed prompt |
-| External design | Implementation complete (step 4) | Confirmed prompt, repo file list |
-| Internal design | Implementation complete (step 4) | Generated code, DB schema, class/method structure |
-| Specification | All tests complete (step 18) | All of the above + test case items |
-| Test report | All tests complete (step 18) | Test case results (UT / IT / E2E) |
+| Requirements definition | Execution starts = prompt confirmed (step 3) | Confirmed prompt |
+| External design | Implementation complete (step 4) | Confirmed prompt + the agent reads the actual code in `/workspace/repo` |
+| Internal design | Implementation complete (step 4) | Confirmed prompt + the agent reads the actual code in `/workspace/repo` |
+| Specification | E2E test run complete (= all tests complete, step 18) | Implementation prompt + all test case items |
+| Test report | E2E test run complete (= all tests complete, step 18) | Latest test run per type + per-case results (UT / IT / E2E) |
+
+Generation runs as **fire-and-forget background tasks** (`asyncio.create_task`) scheduled from the user flows, so the streamed response the user is watching is never delayed. The docgen Claude run uses its own `/tmp` file names inside the container (`xolvien_docgen_*`), so it cannot clobber a concurrent user-facing run; the two share container CPU (accepted v1 limitation). A generation failure is logged and never surfaces into the user flow.
 
 ### 6.2 Document Content Definitions
 
@@ -364,9 +368,24 @@ Documents are generated automatically at each phase transition. They are stored 
 
 ### 6.3 YAML Schema
 
-Each document is stored as a YAML string conforming to a fixed schema per `doc_type`. The schema defines top-level keys, array structures, and field names so that templates can reliably reference them by name.
+All document types share **one common, content-oriented YAML format** — a section tree (auto-numbered `1.` / `1.1` / `1.1.1`, max depth 3) whose sections hold ordered content blocks of five kinds: `text`, `table`, `list`, `figure` (Mermaid), and `image`, in any order. One generic renderer handles every doc type; per-type differences (which chapters, which blocks) are enforced by the generation prompt, not the schema.
 
-### 6.4 Template System
+The normative spec — field tables, JSON Schema, complete example, rendering/generation contracts — is **[document-format.md](document-format.md)**.
+
+> **Design decision (2026-07-07, changed from the original design):** the original §6.3 called for a fixed schema per `doc_type` with named fields that templates reference directly. That couples every template to every doc type and makes adding a document type a schema+template+renderer change. The common block format keeps templates generic (page frame only) and makes new doc types a prompt-only addition.
+
+### 6.4 Storage & API
+
+> **Design decision (2026-07-07, changed from the original design):** documents are stored as **files on the host**, not in a `task_documents` DB table. Rationale: the YAML file is the deliverable itself, file storage needs no migration, keeps every generation as a browsable history, and matches the platform's existing host-artifact pattern (activity logs).
+
+- Location: `{document_data_path}/tasks/{task_id}/` — default `documents` relative to the backend cwd, i.e. `backend/documents/tasks/{task_id}/` (git-ignored; host-persisted in compose via the `./backend:/app` bind mount).
+- File name: `{doc_type}_{YYYYMMDD_HHMMSS}.yaml`. Every generation is kept; the newest timestamp per `doc_type` is the current version. The filesystem is the source of truth (no DB table).
+- Validation: parsed and checked against the `document-format.md` JSON Schema (plus row-width check) before saving; on failure the generation retries with the validation errors appended to the prompt (3 attempts total).
+- API:
+  - `GET /api/v1/tasks/{task_id}/documents` — list `{doc_type, filename, generated_at, size}`, newest first (filesystem scan).
+  - `GET /api/v1/tasks/{task_id}/documents/{filename}` — raw YAML (`application/yaml`). Filenames are validated against the strict `{doc_type}_{timestamp}.yaml` pattern (also blocks path traversal).
+
+### 6.5 Template System
 
 - **Two output formats**: Excel (`.xlsx`) and HTML (`.html`)
 - **Template engines**: Jinja2 for HTML; openpyxl for Excel (cell-level data injection)
@@ -375,7 +394,7 @@ Each document is stored as a YAML string conforming to a fixed schema per `doc_t
 - **Rendering**: `POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html` loads YAML from DB, selects the appropriate template, renders, and returns the file as a download response
 - PDF export is performed by the user via browser print or Excel
 
-### 6.5 Frontend Behavior
+### 6.6 Frontend Behavior
 
 - Document generation is fully automatic — no button press required.
 - After each phase transition that triggers generation, a notice appears in the right pane chat history (e.g. "Requirements definition generated").
@@ -532,7 +551,8 @@ backend/
 │   ├── services/
 │   │   ├── docker_service.py    # Container lifecycle management
 │   │   ├── claude_service.py    # Claude Code CLI execution & test running
-│   │   ├── document_service.py  # Document YAML generation and template rendering (planned)
+│   │   ├── document_service.py  # Document YAML generation + file storage (rendering planned)
+│   │   ├── document_format.py   # Document YAML JSON Schema + validation/extraction helpers
 │   │   ├── document_converter.py # Binary upload (xlsx/docx/pdf) → Markdown extraction (see §9.4)
 │   │   └── test_service.py      # Test result parsing
 │   └── websocket/
@@ -567,8 +587,9 @@ Repository uploads are NOT under backend/; they live on the persistent
 
 | Method | Description |
 |---|---|
-| `generate_document(task_id, doc_type)` | Calls Claude to generate a YAML document of the given type. Saves to `task_documents`. Called internally at phase transitions. |
-| `render_document(task_id, doc_type, format)` | Loads YAML from DB, selects the appropriate template (custom if available, otherwise default), renders via Jinja2 (HTML) or openpyxl (Excel), returns file bytes. |
+| `generate_document(task_id, container_id, doc_type, source_material, lang)` | Runs Claude CLI in the task container (dedicated `xolvien_docgen_*` temp files, non-streaming), extracts the fenced YAML, validates against the format schema with up to 3 attempts (validation errors fed back), saves to `documents/tasks/{task_id}/{doc_type}_{ts}.yaml`. Returns the path or None (failure is logged, never raised). |
+| `schedule_generation(task_id, container_id, jobs, lang)` | Module-level fire-and-forget scheduler: runs a list of `(doc_type, source_material)` jobs sequentially in a background asyncio task. Called from `execute_instruction()` (requirements at start; external/internal design at completion) and `_run_tests()` (specification + test report at E2E completion, sources built by `ClaudeCodeService._build_test_doc_sources()`). |
+| `render_document(task_id, doc_type, format)` | **Planned** (roadmap Sprint 3): loads YAML, selects the template (custom if available, otherwise default), renders via Jinja2 (HTML) or openpyxl (Excel), returns file bytes. |
 
 ### 9.4 Uploads (repository-scoped)
 

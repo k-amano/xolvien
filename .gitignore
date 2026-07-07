@@ -71,6 +71,9 @@ Thumbs.db
 *.log
 logs/
 
+# Generated documents (Sprint 3)
+backend/documents/
+
 # Task data
 /data/
 /tmp/

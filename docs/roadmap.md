@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-07-05 (session 8)
+**Last updated**: 2026-07-07 (session 9)
 
 This document tracks **what is done** and **what is planned**.
 - For the complete intended specification, see `spec.md`.
@@ -38,14 +38,24 @@ Upload spec/design documents and screen mockups so Claude can read them when gen
 - **Binary conversion (resolved the 2026-06-22 blocker, option 1 — server-side extraction):** new `services/document_converter.py` extracts `.xlsx`/`.xlsm` (openpyxl, sheet → Markdown table), `.docx` (python-docx, headings/lists/tables in order), and `.pdf` (pdfplumber, per-page text + tables) into a `.md` sibling at upload time; `_prepare_uploads()` re-ensures conversions lazily (covers pre-existing uploads) and points the prompt at the `.md` path instead of the unreadable binary. Conversion failures are logged, never block the upload.
 - **Frontend**: `RepositoryUploads` component (📎 attach, removable chips, upload-on-select) shown in TaskCreate (when an existing repo is selected) and TaskDetail (repo strip below the topbar).
 
-### Sprint 3 — Automatic Document Generation (large feature: output)
+### Sprint 3 — Automatic Document Generation (large feature: output) 🔄 In progress (step 1 done 2026-07-07)
 
 Auto-generate structured documents at each phase transition (no button press). Documents are stored as YAML and rendered to Excel/HTML via templates at download time — separating data from presentation.
 
-- **Documents & timing**: Requirements definition (clarify complete) · External/basic design (execution complete) · Internal/detailed design (execution complete) · Specification (test complete) · Test report (test complete).
-- **Storage**: `task_documents` table (`id, task_id, doc_type, yaml_content, generated_at`). Claude outputs YAML conforming to a fixed per-type schema.
+Split into steps. **The renderer was deliberately deferred (user decision 2026-07-07): generating and saving the YAML documents comes first.**
+
+| Step | Scope | Status |
+|---|---|---|
+| 3.1 | **Common YAML format spec** — one content-oriented format shared by all doc types: auto-numbered section tree (`1.` / `1.1` / `1.1.1`, max depth 3) + free-order blocks (`text` / `table` / `list` / `figure` (Mermaid) / `image`), JSON Schema validation, generation/rendering contracts. Normative spec: `document-format.md`. *(Changed from the original per-doc-type fixed schemas — one generic renderer, per-type differences live in the generation prompts.)* | ✅ Done (2026-07-07) |
+| 3.2 | **Generation + YAML file storage + auto-triggers + API** — `services/document_format.py` (schema/validation/extraction) + `services/document_service.py` (per-type prompts, docgen Claude run in the container, validate/retry ×3, save). Files at `backend/documents/tasks/{task_id}/{doc_type}_{YYYYMMDD_HHMMSS}.yaml` (every generation kept; filesystem is the source of truth — *changed from the planned `task_documents` DB table, no migration needed*). Background fire-and-forget triggers: requirements at execution start; external/internal design at execution completion; specification + test report at E2E completion. `GET .../documents` (list) + `GET .../documents/{filename}` (raw YAML). | ✅ Done (2026-07-07) |
+| 3.3 | **Renderer** — generic block renderer to HTML (Jinja2, Mermaid inline) and Excel (openpyxl), default page-frame templates under `backend/templates/default/`, `POST .../documents/{doc_type}/render?format=excel\|html`, image asset snapshot. | Planned (deferred) |
+| 3.4 | **Frontend** — "Documents" panel (list + download), generation notices in chat. | Planned |
+| 3.5 | **Custom templates** — `POST/GET /api/v1/templates/{doc_type}`, per-user override of the default page frame; "Templates" settings UI. | Planned |
+
+- **Documents & timing**: Requirements definition (execution start = prompt confirmed) · External/basic design (execution complete) · Internal/detailed design (execution complete) · Specification (E2E complete) · Test report (E2E complete).
+- **Storage**: YAML files at `backend/documents/tasks/{task_id}/` (git-ignored, host-persisted). Claude outputs YAML conforming to the common format (`document-format.md`).
 - **Templates**: Jinja2 (HTML) + openpyxl (Excel). Defaults bundled under `backend/templates/default/{doc_type}/`; user uploads under `backend/templates/{user_id}/{doc_type}/` take precedence. PDF left to the user (browser/Excel export).
-- **Backend**: `POST .../documents/generate/{doc_type}` (internal, per phase) · `POST .../documents/{doc_type}/render?format=excel|html` · `POST/GET /api/v1/templates/{doc_type}`. Add `jinja2`, `openpyxl` deps.
+- **Backend**: `POST .../documents/generate/{doc_type}` (internal, per phase) · `POST .../documents/{doc_type}/render?format=excel|html` · `POST/GET /api/v1/templates/{doc_type}`. Add `jinja2`, `openpyxl` deps (openpyxl already present since Sprint 2).
 - **Frontend**: No Generate button. Availability indicator per phase; collapsible "Documents" panel listing all docs with `Excel`/`HTML` download buttons; "Templates" settings section for custom uploads.
 
 ### Sprint 4 — Operability & observability
@@ -73,6 +83,11 @@ Auto-generate structured documents at each phase transition (no button press). D
 ## Completed
 
 Newest first. Full change notes are in `changelog.md`.
+
+### 2026-07-07 (session 9)
+
+- **Sprint 3 step 3.2: document generation + YAML file storage** — All five doc types generate as schema-validated YAML files (`backend/documents/tasks/{task_id}/{doc_type}_{ts}.yaml`, every generation kept, filesystem is the source of truth — no DB table) via a dedicated non-streaming Claude run in the task container, scheduled fire-and-forget from the user flows (requirements at execution start; external/internal design at completion; specification + test report at E2E completion). `GET .../documents` list + raw-YAML fetch API added. Verified with a real generation against task 13 and the API. Renderer deferred (user decision).
+- **Sprint 3 step 3.1: common document YAML format** — `document-format.md`: one content-oriented format for all doc types (auto-numbered section tree + free-order text/table/list/figure/image blocks, JSON Schema). Replaces the per-doc-type fixed schemas of the original design.
 
 ### 2026-07-05 (session 8)
 
