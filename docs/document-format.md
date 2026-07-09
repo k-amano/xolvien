@@ -220,11 +220,12 @@ natively.
 ```
 
 - Rendered as "Figure N: {caption}" (localized per `language`).
-- **HTML**: rendered with Mermaid (inlined at render time, CSP-safe).
+- **HTML**: rendered client-side with Mermaid loaded from a CDN (matches the
+  prototype renderer; viewing offline shows the diagram source text instead).
 - **Excel (v1)**: the Mermaid source is emitted as preformatted text in a
-  bordered cell block with the figure caption — readable, if not graphical.
-  Pre-rendering Mermaid to PNG for Excel is a possible v2 improvement; the
-  YAML needs no change for it.
+  shaded cell block with the figure caption — readable, if not graphical.
+  Pre-rendering Mermaid to PNG is a possible v2 improvement; the YAML needs
+  no change for it.
 
 ### 3.5 `image`
 
@@ -241,9 +242,11 @@ Raster images that already exist as files — typically E2E screenshots.
 
 - `path` is **workspace-relative** (relative to `/workspace/repo` in the task
   container). At generation time the backend copies each referenced file into
-  a per-document asset snapshot (`backend/doc_assets/{task_id}/{doc_type}/`);
-  rendering resolves `path` against that snapshot, so documents stay
-  renderable after the container or workspace is gone.
+  the per-task asset snapshot (`documents/tasks/{task_id}/assets/{path}`,
+  next to the YAML files); rendering resolves `path` against that snapshot,
+  so documents stay renderable after the container or workspace is gone.
+  Paths containing `..` or absolute paths are refused at snapshot and render
+  time.
 - A `path` that cannot be resolved at generation time is kept in the YAML but
   rendered as a placeholder box with the caption and a localized
   "(image missing)" marker — generation never fails because a screenshot

@@ -935,6 +935,58 @@ docker cp xolvien-task-1:/workspace/repo/translator.html ~/Desktop/translator.ht
 
 ---
 
+## Step 16 — Download the auto-generated documents
+
+While you were building the app, Xolvien **automatically generated deliverable
+documents** in the background — no button press needed:
+
+| Document | Generated when |
+|---|---|
+| Requirements definition | When you clicked "Confirm & Execute" (step 12) |
+| External design / Internal design | When the implementation finished (step 13) |
+| Specification / Test report | After the E2E tests finished |
+
+Generation runs in the background and takes a few minutes per document, so
+they appear a little after each phase completes.
+
+> **Note:** a "Documents" panel in the browser UI is planned. Until it ships,
+> use the commands below (or browse the YAML files directly under
+> `backend/documents/tasks/<task-number>/`).
+
+The task number is the number in the browser URL (e.g. `/tasks/1` → `1`).
+
+**List the generated documents:**
+
+```bash
+curl -H "Authorization: Bearer dev-token-12345" \
+  "http://localhost:8000/api/v1/tasks/1/documents"
+```
+
+This returns each document's `filename` (e.g.
+`requirements_20260709_153000.yaml`).
+
+**Download as HTML (open in a browser):**
+
+```bash
+curl -H "Authorization: Bearer dev-token-12345" \
+  -o requirements.html \
+  "http://localhost:8000/api/v1/tasks/1/documents/requirements_20260709_153000.yaml/render?format=html"
+```
+
+**Download as Excel:**
+
+```bash
+curl -H "Authorization: Bearer dev-token-12345" \
+  -o requirements.xlsx \
+  "http://localhost:8000/api/v1/tasks/1/documents/requirements_20260709_153000.yaml/render?format=excel"
+```
+
+The HTML file is self-contained (images embedded) and prints to PDF nicely
+from the browser. Diagrams need an internet connection to display (they are
+drawn by a script loaded from a CDN).
+
+---
+
 # Congratulations!
 
 You've built a translation app using Xolvien.
@@ -1068,6 +1120,19 @@ Done when you see:
 ---
 
 # Troubleshooting
+
+## Reviewing past execution logs
+
+Everything shown in the left log pane is also saved to files on your machine,
+one file per run:
+
+```
+backend/logs/tasks/<task-number>/<flow>_<date>_<time>.log
+```
+
+(`<flow>` is e.g. `clarify`, `execute`, `run_unit_tests`, `git_push`.) When
+something went wrong in an earlier run — or the browser was closed — open the
+matching file to see the full timestamped log.
 
 ## Task creation fails or stays "initializing"
 

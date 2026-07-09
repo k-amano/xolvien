@@ -2,6 +2,70 @@
 
 ---
 
+## 2026-07-09
+
+### Sprint 3 step 3.3 — HTML/Excel renderer + render endpoint
+
+One generic, doc-type-agnostic renderer per output format
+(`services/document_renderer.py`), implementing document-format.md §6 for the
+full v1.1 feature set. The HTML renderer is adapted from the user-provided
+prototype (`docs/upload/renderer.py`) and keeps its deliverable styling and
+cell-merge semantics.
+
+**HTML** (`HtmlDocumentRenderer`):
+- Cover page (title/subtitle/version/date/organization/department/author/
+  reviewers/approver), revision-history page, per-page document header,
+  green level-1 heading bands, blue-left-bar level-2 headings.
+- Tables: `colspan`/`rowspan` attributes with the prototype's rowspan
+  continuation tracking, multi-row `<thead>`-style headers, `row_header_cols`
+  as styled `<th>`s; captions numbered `{section}-{n}` per the prototype.
+- `page_break_before` via print CSS; `note` callouts (info/warning/
+  important); `code` blocks; Mermaid figures via CDN script (offline shows
+  the source text).
+- Images embedded as **base64 data URIs** resolved from the per-task asset
+  snapshot — the downloaded HTML is fully self-contained; missing images
+  render a localized placeholder box. Fixed strings localized (ja/en),
+  including the cover labels the prototype had hardcoded in Japanese.
+- Figures and images share one number sequence (the prototype counted them
+  separately, which would have produced duplicate figure numbers).
+
+**Excel** (`ExcelDocumentRenderer`, openpyxl): same tree walk — cover +
+revision rows, styled numbered headings, bordered grids with `merge_cells()`
+for colspan/rowspan and gray header/row-header fills, manual page breaks,
+embedded images (scaled to content width), preformatted Mermaid/code blocks,
+indented list rows.
+
+**Generation-side** (`document_service.py`): after validation, every
+referenced image is copied out of the container (base64 over docker exec)
+into `documents/tasks/{task_id}/assets/{path}`; `..`/absolute paths refused;
+failures never break generation.
+
+**API** (`api/documents.py`): `GET .../documents/{filename}/render?format=
+html|excel` — re-validates the stored YAML (422 if invalid), returns
+self-contained HTML inline or an `.xlsx` attachment. *(Changed from the
+originally planned `POST .../{doc_type}/render`: downloads are naturally
+GETs and the filename pins an exact generation.)* The page frame is built in
+code for now; template externalization is step 3.5 (Jinja2 not needed yet).
+
+**Verified:** the v1.1 sample renders with all features (headless-Chromium
+screenshot: cover → revision history → merged/multi-header tables match the
+prototype's look); Excel reloads via openpyxl with correct vertical (rowspan)
+and horizontal (colspan) merged ranges, 4 page breaks, and an embedded image;
+the real generated requirements doc renders in both formats; EN localization;
+missing-image placeholder and `..`-path refusal; API returns 200 with correct
+content types, 422 for unknown formats, 404 for traversal filenames.
+**Not verified:** Excel appearance in Excel/LibreOffice itself (structure
+checked programmatically only).
+
+**Docs / user guides:** getting-started (EN/JA) gained "Step 16 — Download
+the auto-generated documents" (what generates when, curl commands for the
+list + HTML/Excel render endpoints, file locations, CDN note for diagrams)
+and a troubleshooting entry pointing at the Sprint-4.1 activity log files
+(`backend/logs/tasks/{task_id}/`); spec.md §6.6 now marks the Documents
+panel as planned UI and documents today's API/file access path.
+
+---
+
 ## 2026-07-07
 
 ### Document format v1.1 — deliverable-grade extensions

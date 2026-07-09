@@ -191,6 +191,9 @@ class DocumentService:
     def task_document_dir(self, task_id: int) -> str:
         return os.path.join(get_settings().document_data_path, "tasks", str(task_id))
 
+    def task_assets_dir(self, task_id: int) -> str:
+        return os.path.join(self.task_document_dir(task_id), "assets")
+
     def _save(self, task_id: int, doc_type: str, yaml_text: str) -> str:
         doc_dir = self.task_document_dir(task_id)
         os.makedirs(doc_dir, exist_ok=True)
@@ -199,6 +202,51 @@ class DocumentService:
         with open(path, "w", encoding="utf-8") as f:
             f.write(yaml_text if yaml_text.endswith("\n") else yaml_text + "\n")
         return path
+
+    @staticmethod
+    def _image_paths(data: dict) -> List[str]:
+        """All image-block paths in a validated document."""
+        paths: List[str] = []
+
+        def walk(sections):
+            for section in sections:
+                for block in section.get("blocks") or []:
+                    if block.get("type") == "image" and block.get("path"):
+                        paths.append(block["path"])
+                walk(section.get("sections") or [])
+
+        walk(data.get("sections", []))
+        return paths
+
+    def _snapshot_images(self, task_id: int, container_id: str, data: dict) -> None:
+        """
+        Copy each referenced image out of the container into the per-task asset
+        snapshot so documents stay renderable after the container/workspace is
+        gone. A missing or unreadable image is skipped (renderers show a
+        placeholder); the snapshot never fails the generation.
+        """
+        assets_dir = self.task_assets_dir(task_id)
+        for path in self._image_paths(data):
+            normalized = os.path.normpath(path)
+            if normalized.startswith("..") or os.path.isabs(normalized):
+                continue  # outside the workspace — refuse
+            dest = os.path.join(assets_dir, normalized)
+            if os.path.isfile(dest):
+                continue  # already snapshotted by an earlier document
+            try:
+                exit_code, output, _ = self.docker_service.execute_command(
+                    container_id,
+                    f"base64 '/workspace/repo/{normalized}' 2>/dev/null",
+                    "/workspace/repo",
+                )
+                if exit_code != 0 or not output.strip():
+                    continue
+                content = base64.b64decode(output)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(content)
+            except Exception:
+                logger.warning("Image snapshot failed: task %s, %s", task_id, path)
 
     # ── generation ─────────────────────────────────────────────────────────
 
@@ -265,6 +313,7 @@ class DocumentService:
                 errors = validate_document(data)
                 if errors:
                     raise ValueError("; ".join(errors))
+                await asyncio.to_thread(self._snapshot_images, task_id, container_id, data)
                 path = self._save(task_id, doc_type, yaml_text)
                 logger.info("Generated document %s (attempt %d): %s", doc_type, attempt, path)
                 return path

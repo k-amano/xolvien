@@ -1,6 +1,6 @@
 # Roadmap
 
-**Last updated**: 2026-07-07 (session 9)
+**Last updated**: 2026-07-09 (session 10)
 
 This document tracks **what is done** and **what is planned**.
 - For the complete intended specification, see `spec.md`.
@@ -48,9 +48,9 @@ Split into steps. **The renderer was deliberately deferred (user decision 2026-0
 |---|---|---|
 | 3.1 | **Common YAML format spec** — one content-oriented format shared by all doc types: auto-numbered section tree (`1.` / `1.1` / `1.1.1`, max depth 3) + free-order blocks, JSON Schema validation, generation/rendering contracts. Normative spec: `document-format.md`. *(Changed from the original per-doc-type fixed schemas — one generic renderer, per-type differences live in the generation prompts.)* **v1.1 (same day, user proposal):** deliverable-grade extensions — cell merging (`colspan`/`rowspan`), multi-row headers, `row_header_cols`, `cover` + `revisions` metadata, `page_break_before`, `code`/`note` blocks, image `width`/`align`. Backward compatible; blocks are now 7 kinds (`text` / `table` / `list` / `figure` (Mermaid) / `image` / `code` / `note`). | ✅ Done (2026-07-07) |
 | 3.2 | **Generation + YAML file storage + auto-triggers + API** — `services/document_format.py` (schema/validation/extraction) + `services/document_service.py` (per-type prompts, docgen Claude run in the container, validate/retry ×3, save). Files at `backend/documents/tasks/{task_id}/{doc_type}_{YYYYMMDD_HHMMSS}.yaml` (every generation kept; filesystem is the source of truth — *changed from the planned `task_documents` DB table, no migration needed*). Background fire-and-forget triggers: requirements at execution start; external/internal design at execution completion; specification + test report at E2E completion. `GET .../documents` (list) + `GET .../documents/{filename}` (raw YAML). | ✅ Done (2026-07-07) |
-| 3.3 | **Renderer** — generic block renderer to HTML (Jinja2, Mermaid inline) and Excel (openpyxl), default page-frame templates under `backend/templates/default/`, `POST .../documents/{doc_type}/render?format=excel\|html`, image asset snapshot. | Planned (deferred) |
+| 3.3 | **Renderer** — `services/document_renderer.py`: one generic v1.1 block renderer per format, based on the user-provided HTML prototype (deliverable styling: cover, revision history, heading bands, merged cells, multi-row headers, row headers, page breaks, notes/code; Mermaid via CDN; images as base64 data URIs) + an Excel renderer (openpyxl `merge_cells`, header fills, manual page breaks, embedded images). Image asset snapshot at generation (`documents/tasks/{id}/assets/`). Endpoint: `GET .../documents/{filename}/render?format=html\|excel` (*changed from the planned POST-on-doc_type — downloads are GETs and the filename pins an exact generation*). Page-frame templates externalize in 3.5. | ✅ Done (2026-07-09) |
 | 3.4 | **Frontend** — "Documents" panel (list + download), generation notices in chat. | Planned |
-| 3.5 | **Custom templates** — `POST/GET /api/v1/templates/{doc_type}`, per-user override of the default page frame; "Templates" settings UI. | Planned |
+| 3.5 | **Custom templates** — externalize the page frame into `backend/templates/default/`; `POST/GET /api/v1/templates/{doc_type}`, per-user override; "Templates" settings UI. | Planned |
 
 - **Documents & timing**: Requirements definition (execution start = prompt confirmed) · External/basic design (execution complete) · Internal/detailed design (execution complete) · Specification (E2E complete) · Test report (E2E complete).
 - **Storage**: YAML files at `backend/documents/tasks/{task_id}/` (git-ignored, host-persisted). Claude outputs YAML conforming to the common format (`document-format.md`).
@@ -83,6 +83,10 @@ Split into steps. **The renderer was deliberately deferred (user decision 2026-0
 ## Completed
 
 Newest first. Full change notes are in `changelog.md`.
+
+### 2026-07-09 (session 10)
+
+- **Sprint 3 step 3.3: HTML/Excel renderer + render endpoint** — Generic v1.1 renderer (`document_renderer.py`) based on the user's HTML prototype: cover page, revision history, deliverable heading styles, `colspan`/`rowspan` merges, multi-row headers, row headers, page breaks, notes/code blocks, Mermaid (CDN), base64-embedded images; Excel counterpart via openpyxl. Images are snapshotted from the container at generation time. `GET .../documents/{filename}/render?format=html|excel`. Verified with the v1.1 sample (screenshot), the real generated requirements doc, EN localization, image embed/missing/traversal cases, and API responses.
 
 ### 2026-07-07 (session 9)
 

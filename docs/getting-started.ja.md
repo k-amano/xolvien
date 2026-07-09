@@ -1004,6 +1004,51 @@ docker cp xolvien-task-1:/workspace/repo/translator.html ~/Desktop/translator.ht
 
 ---
 
+## 手順16｜自動生成ドキュメントをダウンロードする
+
+アプリを作っている間に、Xolvien は**納品用ドキュメントを自動生成**しています（ボタン操作は不要です）。
+
+| ドキュメント | 生成されるタイミング |
+|---|---|
+| 要件定義書 | 「確定して実行」を押したとき（手順12） |
+| 外部設計書・内部設計書 | 実装が完了したとき（手順13） |
+| 仕様書・テスト報告書 | E2E テストが完了した後 |
+
+生成はバックグラウンドで行われ、1つにつき数分かかるため、各フェーズの完了から少し遅れて現れます。
+
+> **補足：** ブラウザ画面に「ドキュメント」パネルを追加する予定です。それまでは以下のコマンドを使うか、`backend/documents/tasks/<タスク番号>/` の YAML ファイルを直接参照してください。
+
+タスク番号は、ブラウザの URL に含まれる数字です（例：`/tasks/1` → `1`）。
+
+**生成済みドキュメントの一覧を見る：**
+
+```bash
+curl -H "Authorization: Bearer dev-token-12345" \
+  "http://localhost:8000/api/v1/tasks/1/documents"
+```
+
+各ドキュメントの `filename`（例：`requirements_20260709_153000.yaml`）が返ってきます。
+
+**HTML でダウンロードする（ブラウザで開けます）：**
+
+```bash
+curl -H "Authorization: Bearer dev-token-12345" \
+  -o requirements.html \
+  "http://localhost:8000/api/v1/tasks/1/documents/requirements_20260709_153000.yaml/render?format=html"
+```
+
+**Excel でダウンロードする：**
+
+```bash
+curl -H "Authorization: Bearer dev-token-12345" \
+  -o requirements.xlsx \
+  "http://localhost:8000/api/v1/tasks/1/documents/requirements_20260709_153000.yaml/render?format=excel"
+```
+
+HTML ファイルは画像埋め込み済みの単体ファイルで、ブラウザの印刷機能から PDF 化できます。図（ダイアグラム）の表示にはインターネット接続が必要です（CDN から読み込むスクリプトで描画されるため）。
+
+---
+
 # 完成おめでとうございます！
 
 これで Xolvien を使って翻訳アプリを作ることができました。
@@ -1140,6 +1185,16 @@ docker compose down
 ---
 
 # トラブルシューティング
+
+## 過去の実行ログを確認したい
+
+左側のログエリアに表示される内容は、実行1回ごとに手元のファイルにも保存されています：
+
+```
+backend/logs/tasks/<タスク番号>/<フロー名>_<日付>_<時刻>.log
+```
+
+（`<フロー名>` は `clarify`、`execute`、`run_unit_tests`、`git_push` など。）以前の実行で問題が起きたときや、ブラウザを閉じてしまったときは、該当ファイルを開くとタイムスタンプ付きの完全なログを確認できます。
 
 ## タスク作成に失敗する・「initializing」から進まない
 

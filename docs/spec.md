@@ -325,7 +325,7 @@ Claude Code's `Read` tool rejects binary files, so binary documents are **conver
 
 Documents are generated automatically at each phase transition. They are stored as YAML files on the host (see §6.4) and will be rendered into Excel or HTML via templates at download time (renderer planned — see roadmap Sprint 3).
 
-> **Status (2026-07-07):** generation + YAML file storage + list/fetch API are implemented; the renderer and the frontend Documents panel are not yet.
+> **Status (2026-07-09):** generation, YAML file storage, list/fetch API, and the HTML/Excel renderer + render endpoint are implemented; the frontend Documents panel and custom templates are not yet.
 
 ### 6.1 Document Types and Generation Timing
 
@@ -381,22 +381,26 @@ The normative spec — field tables, JSON Schema, complete example, rendering/ge
 - Location: `{document_data_path}/tasks/{task_id}/` — default `documents` relative to the backend cwd, i.e. `backend/documents/tasks/{task_id}/` (git-ignored; host-persisted in compose via the `./backend:/app` bind mount).
 - File name: `{doc_type}_{YYYYMMDD_HHMMSS}.yaml`. Every generation is kept; the newest timestamp per `doc_type` is the current version. The filesystem is the source of truth (no DB table).
 - Validation: parsed and checked against the `document-format.md` JSON Schema (plus row-width check) before saving; on failure the generation retries with the validation errors appended to the prompt (3 attempts total).
+- Image assets: at generation time, every referenced image is copied from the container into the per-task snapshot `documents/tasks/{task_id}/assets/{path}` (missing images are skipped — renderers show a placeholder). `..`/absolute paths are refused.
 - API:
   - `GET /api/v1/tasks/{task_id}/documents` — list `{doc_type, filename, generated_at, size}`, newest first (filesystem scan).
   - `GET /api/v1/tasks/{task_id}/documents/{filename}` — raw YAML (`application/yaml`). Filenames are validated against the strict `{doc_type}_{timestamp}.yaml` pattern (also blocks path traversal).
+  - `GET /api/v1/tasks/{task_id}/documents/{filename}/render?format=html|excel` — renders the stored YAML on the fly: self-contained HTML (images as base64 data URIs, Mermaid via CDN) or an `.xlsx` workbook. The stored document is re-validated before rendering (422 on failure); unknown formats are rejected. *(GET on a specific filename instead of the originally planned `POST .../{doc_type}/render` — downloads are naturally GETs and the filename pins an exact generation.)*
 
-### 6.5 Template System
+### 6.5 Renderer & Template System
 
-- **Two output formats**: Excel (`.xlsx`) and HTML (`.html`)
-- **Template engines**: Jinja2 for HTML; openpyxl for Excel (cell-level data injection)
-- **Standard templates**: bundled under `backend/templates/default/{doc_type}/` for both formats
-- **Custom templates**: uploaded by the user via `POST /api/v1/templates/{doc_type}`; stored under `backend/templates/{user_id}/{doc_type}/` and take precedence over the default
-- **Rendering**: `POST /api/v1/tasks/{id}/documents/{doc_type}/render?format=excel|html` loads YAML from DB, selects the appropriate template, renders, and returns the file as a download response
-- PDF export is performed by the user via browser print or Excel
+- **Two output formats**: Excel (`.xlsx`, openpyxl) and HTML — one generic block renderer per format (`services/document_renderer.py`), doc-type-agnostic per `document-format.md` §6.
+- **HTML** (adapted from the user-provided prototype): deliverable styling — cover page, revision-history page, green level-1 heading bands, bordered tables with `colspan`/`rowspan`, multi-row headers, row-header styling, print CSS page breaks, notes/code blocks, Mermaid via CDN, images embedded as base64 data URIs (self-contained file).
+- **Excel**: same tree walk with `merge_cells()` for spans, header fills, manual page breaks, embedded images, preformatted Mermaid/code blocks.
+- **Page frame is currently built in code**; externalizing it into default templates (`backend/templates/default/`) and per-user custom templates (`POST /api/v1/templates/{doc_type}`, stored under `backend/templates/{user_id}/{doc_type}/`, taking precedence) is planned — see roadmap Sprint 3 step 3.5.
+- PDF export is performed by the user via browser print or Excel.
 
 ### 6.6 Frontend Behavior
 
-- Document generation is fully automatic — no button press required.
+Document generation is fully automatic — no button press required. The UI for browsing/downloading is **not yet implemented** (roadmap steps 3.4/3.5); until it ships, users access documents via the API (`GET .../documents`, `GET .../documents/{filename}/render?format=html|excel` — see §6.4) or the YAML files under `backend/documents/tasks/{task_id}/`. The getting-started guides describe the concrete commands.
+
+Planned UI (steps 3.4/3.5):
+
 - After each phase transition that triggers generation, a notice appears in the right pane chat history (e.g. "Requirements definition generated").
 - A "Documents" panel in the task detail page lists all generated documents for the task with their `generated_at` timestamps.
 - Each document row has two download buttons: `Excel` and `HTML`.
@@ -551,8 +555,9 @@ backend/
 │   ├── services/
 │   │   ├── docker_service.py    # Container lifecycle management
 │   │   ├── claude_service.py    # Claude Code CLI execution & test running
-│   │   ├── document_service.py  # Document YAML generation + file storage (rendering planned)
+│   │   ├── document_service.py  # Document YAML generation + file storage + image asset snapshot
 │   │   ├── document_format.py   # Document YAML JSON Schema + validation/extraction helpers
+│   │   ├── document_renderer.py # Generic YAML -> HTML / Excel block renderer (i18n fixed strings)
 │   │   ├── document_converter.py # Binary upload (xlsx/docx/pdf) → Markdown extraction (see §9.4)
 │   │   └── test_service.py      # Test result parsing
 │   └── websocket/
@@ -589,7 +594,7 @@ Repository uploads are NOT under backend/; they live on the persistent
 |---|---|
 | `generate_document(task_id, container_id, doc_type, source_material, lang)` | Runs Claude CLI in the task container (dedicated `xolvien_docgen_*` temp files, non-streaming), extracts the fenced YAML, validates against the format schema with up to 3 attempts (validation errors fed back), saves to `documents/tasks/{task_id}/{doc_type}_{ts}.yaml`. Returns the path or None (failure is logged, never raised). |
 | `schedule_generation(task_id, container_id, jobs, lang)` | Module-level fire-and-forget scheduler: runs a list of `(doc_type, source_material)` jobs sequentially in a background asyncio task. Called from `execute_instruction()` (requirements at start; external/internal design at completion) and `_run_tests()` (specification + test report at E2E completion, sources built by `ClaudeCodeService._build_test_doc_sources()`). |
-| `render_document(task_id, doc_type, format)` | **Planned** (roadmap Sprint 3): loads YAML, selects the template (custom if available, otherwise default), renders via Jinja2 (HTML) or openpyxl (Excel), returns file bytes. |
+| `document_renderer.render_document(doc, fmt, assets_dir, generated_at)` | Renders a parsed document dict to a self-contained HTML string or `.xlsx` bytes (`HtmlDocumentRenderer` / `ExcelDocumentRenderer`). Exposed via `GET .../documents/{filename}/render?format=html\|excel`. Template selection (custom over default) comes with step 3.5. |
 
 ### 9.4 Uploads (repository-scoped)
 
