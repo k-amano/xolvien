@@ -314,7 +314,10 @@ Claude Code's `Read` tool rejects binary files, so binary documents are **conver
 
 ### 5.3 Frontend Behavior
 
-- A `RepositoryUploads` component (paperclip button) is shown in **TaskCreate** (when an existing repository is selected) and **TaskDetail** (a repository strip below the topbar).
+> **Design decision (2026-07-09, changed from the original design):** the attach control originally lived in its own "Reference files" strip, separate from the instruction input. Per user feedback this did not read as an attachment operation — it looked disconnected from the message being composed. Reworked to mirror a GitHub Issue comment box: the 📎 control sits **in the instruction textarea's own Markdown toolbar** (with Bold/Italic/code/etc.), and the attached-file chips render **directly above the textarea**, i.e. where a comment box shows what you've dropped into it. The underlying attachment model is unchanged — files remain repository-scoped and persist across every task of the project (see §5.1–5.2); only the placement of the controls changed.
+- `components/RepositoryUploads.tsx` now exports a hook (`useRepositoryUploads`) plus two small pieces of UI (`AttachFilesButton`, `AttachedFilesChips`) instead of one self-contained component, so the button and the chip list can be placed independently.
+- **TaskDetail**: `AttachFilesButton` is the last icon in the Markdown toolbar above the instruction textarea (after a divider); `AttachedFilesChips` renders immediately above the textarea, labeled "Reference files".
+- **TaskCreate**: unchanged placement (a labeled row below the repository dropdown, shown only once an existing repository is selected) — there is no per-message toolbar on this screen since no instruction is being composed yet, so the button and chips render together as before, just via the new shared hook.
 - Attached filenames appear as chips; each chip has a remove (×) button.
 - Files are uploaded immediately on selection.
 - The instruction textarea is not auto-populated — files are attached silently.

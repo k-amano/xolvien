@@ -5,7 +5,7 @@ import { getTask, getLogs, stopTask, executeInstructionStream, generatePromptStr
 import type { TestCaseItem } from '../types'
 import { useLang } from '../i18n'
 import { classifyError, type ErrorCode } from '../errors'
-import { RepositoryUploads } from '../components/RepositoryUploads'
+import { useRepositoryUploads, AttachFilesButton, AttachedFilesChips } from '../components/RepositoryUploads'
 import { PhaseProgress } from '../components/PhaseProgress'
 import { recordPhaseDuration } from '../services/phaseHistory'
 
@@ -172,6 +172,7 @@ export default function TaskDetail() {
   }
 
   const [task, setTask] = useState<Task | null>(null)
+  const repoUploads = useRepositoryUploads(task?.repository_id)
   const [taskError, setTaskError] = useState<string | null>(null)
   // Active (unresolved) execution error — surfaced as a prominent banner in the
   // right pane. All action buttons stay disabled until the user dismisses it.
@@ -2566,6 +2567,8 @@ export default function TaskDetail() {
                   {btn.label}
                 </button>
               ))}
+              <span style={{ width: '1px', height: '14px', background: '#30363d', margin: '0 4px' }} />
+              <AttachFilesButton state={repoUploads} disabled={textareaDisabled} />
             </div>
           )}
 
@@ -2576,6 +2579,11 @@ export default function TaskDetail() {
             </span>
           )}
         </div>
+
+        {/* Attached files — shown just above the input, like a comment box's
+            attachment list. Files persist with the repository (see
+            RepositoryUploads) and are reused by every task of the project. */}
+        <AttachedFilesChips state={repoUploads} compact />
 
         {/* Write/Preview area */}
         {inputTab === 'write' ? (
@@ -2752,17 +2760,6 @@ export default function TaskDetail() {
               {stopping ? t.stopping : t.stop}
             </button>
           )}
-        </div>
-
-        {/* Repository-level reference files — shared across all tasks of this project */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '10px',
-          padding: '6px 24px', borderBottom: '1px solid #21262d', flexWrap: 'wrap',
-        }}>
-          <span style={{ fontSize: '0.72rem', color: '#8b949e', fontWeight: 600, flexShrink: 0 }}>
-            {t.repoAttachments}
-          </span>
-          <RepositoryUploads repositoryId={task.repository_id} compact />
         </div>
 
         <div className="task-detail-body" ref={bodyRef}>

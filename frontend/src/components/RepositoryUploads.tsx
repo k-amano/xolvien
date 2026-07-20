@@ -3,21 +3,20 @@ import type { Upload } from '../types'
 import { getRepositoryUploads, uploadRepositoryFiles, deleteRepositoryUpload } from '../services/api'
 import { useLang } from '../i18n'
 
-interface Props {
-  repositoryId: number
-  // Compact mode renders a tighter layout (used inside the task detail panel).
-  compact?: boolean
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-// Repository-scoped file attachments (spec/design docs, mockups). Uploaded files
-// persist with the repository and are referenced by every fix-task of the project.
-export function RepositoryUploads({ repositoryId, compact }: Props) {
+// Repository-scoped file attachments (spec/design docs, mockups). Uploaded
+// files persist with the repository (not a single task) and are referenced
+// by every fix-task of the project — attaching once from any task's input
+// makes the file available to all of them.
+//
+// Split into a hook + two small pieces of UI so the button can live in the
+// instruction textarea's Markdown toolbar (next to Bold/Italic/...) while the
+// chip list renders just above the textarea — the GitHub-Issue-comment-box
+// layout, instead of a separate "Reference files" strip.
+//
+// repositoryId may be undefined while the task is still loading; the hook is
+// a no-op until a real id is available (safe to call unconditionally at the
+// top of a component, per the rules of hooks).
+export function useRepositoryUploads(repositoryId: number | undefined) {
   const { t } = useLang()
   const [uploads, setUploads] = useState<Upload[]>([])
   const [busy, setBusy] = useState(false)
@@ -25,6 +24,7 @@ export function RepositoryUploads({ repositoryId, compact }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    if (!repositoryId) { setUploads([]); return }
     let cancelled = false
     getRepositoryUploads(repositoryId)
       .then(u => { if (!cancelled) setUploads(u) })
@@ -33,7 +33,7 @@ export function RepositoryUploads({ repositoryId, compact }: Props) {
   }, [repositoryId])
 
   async function handleFiles(fileList: FileList | null) {
-    if (!fileList || fileList.length === 0) return
+    if (!repositoryId || !fileList || fileList.length === 0) return
     setBusy(true)
     setError(null)
     try {
@@ -48,6 +48,7 @@ export function RepositoryUploads({ repositoryId, compact }: Props) {
   }
 
   async function handleRemove(uploadId: number) {
+    if (!repositoryId) return
     try {
       await deleteRepositoryUpload(repositoryId, uploadId)
       setUploads(prev => prev.filter(u => u.id !== uploadId))
@@ -56,34 +57,71 @@ export function RepositoryUploads({ repositoryId, compact }: Props) {
     }
   }
 
+  return { uploads, busy, error, inputRef, handleFiles, handleRemove }
+}
+
+export type RepositoryUploadsState = ReturnType<typeof useRepositoryUploads>
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// Icon button for a toolbar (Markdown toolbar, etc.) + the hidden file input.
+export function AttachFilesButton({ state, disabled }: { state: RepositoryUploadsState; disabled?: boolean }) {
+  const { t } = useLang()
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          onClick={() => inputRef.current?.click()}
-          disabled={busy}
-        >
-          📎 {busy ? t.uploading : t.attachFiles}
-        </button>
-        <span style={{ fontSize: '0.72rem', color: '#8b949e' }}>{t.uploadHint}</span>
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          style={{ display: 'none' }}
-          onChange={e => handleFiles(e.target.files)}
-        />
-      </div>
+    <>
+      <button
+        type="button"
+        title={t.attachFiles}
+        onClick={() => state.inputRef.current?.click()}
+        disabled={disabled || state.busy}
+        style={{
+          background: 'none',
+          border: '1px solid transparent',
+          borderRadius: '4px',
+          color: '#8b949e',
+          padding: '2px 6px',
+          fontSize: '0.85rem',
+          cursor: disabled || state.busy ? 'default' : 'pointer',
+          lineHeight: 1,
+          opacity: state.busy ? 0.6 : 1,
+        }}
+        onMouseEnter={e => { if (!disabled && !state.busy) (e.currentTarget as HTMLButtonElement).style.background = '#21262d' }}
+        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+      >
+        📎
+      </button>
+      <input
+        ref={state.inputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={e => state.handleFiles(e.target.files)}
+      />
+    </>
+  )
+}
 
-      {error && (
-        <div style={{ fontSize: '0.78rem', color: '#fca5a5' }}>{error}</div>
+// Chip list rendered just above the textarea (attached-to-this-project files),
+// mirroring where a comment box shows files you've dropped into it.
+export function AttachedFilesChips({ state, compact }: { state: RepositoryUploadsState; compact?: boolean }) {
+  const { t } = useLang()
+  if (state.uploads.length === 0 && !state.error) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px 0' }}>
+      {state.error && (
+        <div style={{ fontSize: '0.78rem', color: '#fca5a5' }}>{state.error}</div>
       )}
-
-      {uploads.length > 0 && (
+      {state.uploads.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-          {uploads.map(u => (
+          <span style={{ fontSize: '0.72rem', color: '#6e7681', alignSelf: 'center' }}>
+            {t.repoAttachments}:
+          </span>
+          {state.uploads.map(u => (
             <span
               key={u.id}
               title={`${u.filename} · ${formatSize(u.size)}`}
@@ -99,7 +137,7 @@ export function RepositoryUploads({ repositoryId, compact }: Props) {
               </span>
               <button
                 type="button"
-                onClick={() => handleRemove(u.id)}
+                onClick={() => state.handleRemove(u.id)}
                 title={t.uploadRemove}
                 style={{
                   background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer',

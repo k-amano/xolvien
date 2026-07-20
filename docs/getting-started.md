@@ -687,13 +687,52 @@ The dialog has three tabs: **"Select existing repository"**, **"Add new reposito
 
 > **About branch name:** Leaving it blank automatically creates a branch named `xolvien/{id}-{title-slug}` from `main` (e.g. `xolvien/1-translation-app`). Only fill this in if you need a specific branch name.
 
-> **Tip — attaching a specification:** If you already have a spec or design document (Excel/Word/PDF/Markdown), you can attach it with the **📎** button (shown here when an existing repository is selected, and on the task detail screen). Claude reads attached files when clarifying requirements and implementing. A full sample specification is provided at [`docs/samples/sample-spec.xlsx`](samples/README.md).
+> If you already have a spec or design document, you can attach it here — see Step 8-2 below for how.
 
 ---
 
 ### Step C — Create
 
 Click the blue **"Create task"** button.
+
+---
+
+## Step 8-2 — Attach a specification file (optional)
+
+If you have a spec or design document (Excel `.xlsx`, Word `.docx`, PDF, or
+Markdown/plain text), you can attach it so Claude reads it when clarifying
+requirements and implementing. This step is optional — skip it if you don't
+have one yet (you can attach it later at any time; see below).
+
+Files are attached to the **repository**, not to one task, so every task you
+create for this project can reuse the same attachment without re-uploading.
+
+> **Try it with the bundled sample:** a full example specification —
+> `docs/samples/sample-spec.xlsx` (an Expense Tracker REST API spec) — ships
+> with this repository. See [`docs/samples/README.md`](samples/README.md) for
+> what it contains.
+
+**Where the 📎 button appears:**
+
+| Screen | Location |
+|---|---|
+| Task-creation dialog | Only after you pick a repository under **"Select existing repository"** (Step A) — a **"Reference files 📎"** row appears below the repository dropdown. It does not appear on the "Add new repository" or "Create on GitHub" tabs (there is no repository to attach to yet), or before you have selected a repository. |
+| Task detail screen | In the **instruction box's Markdown toolbar** (the row with **B / I / `<>` / ``` / — / •**, just above the text area) — the 📎 button is the last icon, after a thin divider. This mirrors a GitHub Issue comment box: the attach control lives right where you write, not in a separate area. |
+
+**To attach a file:**
+
+1. Click the **📎** button.
+2. Choose one or more files in the file picker. Upload starts immediately — no separate "confirm" step.
+3. Once uploaded, each file appears as a chip labeled "Reference files" **directly above the text area**, with its name. Click the **×** on a chip to remove it.
+
+Attached files are copied into the task container automatically on the next
+Claude run (clarify / execute) — there is nothing further to do.
+
+> **If you don't see the 📎 button on the task detail screen:** confirm the
+> instruction box is showing the **Write** tab (not Preview) and that the
+> task has a container (an empty/failed repository has nothing to attach
+> to). Try a hard-refresh of the browser page (Ctrl+Shift+R / Cmd+Shift+R) in
+> case it's showing a stale cached version.
 
 ---
 

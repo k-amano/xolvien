@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import type { Repository } from '../types'
 import { getRepositories, createRepository, createGitHubRepository, createTask } from '../services/api'
-import { RepositoryUploads } from '../components/RepositoryUploads'
+import { useRepositoryUploads, AttachFilesButton, AttachedFilesChips } from '../components/RepositoryUploads'
 import { useLang } from '../i18n'
 
 type RepoMode = 'existing' | 'new' | 'github'
@@ -35,6 +35,8 @@ export default function TaskCreate() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [loadingRepos, setLoadingRepos] = useState(true)
+  const selectedRepoIdNum = selectedRepoId ? parseInt(selectedRepoId, 10) : undefined
+  const repoUploads = useRepositoryUploads(selectedRepoIdNum)
 
   useEffect(() => {
     getRepositories()
@@ -269,8 +271,10 @@ export default function TaskCreate() {
                   )}
                   {selectedRepoId && (
                     <div style={{ marginTop: '10px' }}>
-                      <label className="form-label">{t.repoAttachments}</label>
-                      <RepositoryUploads repositoryId={parseInt(selectedRepoId, 10)} />
+                      <label className="form-label">
+                        {t.repoAttachments} <AttachFilesButton state={repoUploads} />
+                      </label>
+                      <AttachedFilesChips state={repoUploads} />
                     </div>
                   )}
                 </div>

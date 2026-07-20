@@ -4,6 +4,66 @@
 
 ## 2026-07-09
 
+### File attach UI moved into the instruction toolbar (GitHub-Issue-style)
+
+User feedback: the 📎 attach control lived in its own "Reference files" strip
+above the task detail body — visually disconnected from the message being
+composed, unlike a GitHub Issue comment box where attaching happens right
+where you type. Operation-only change: the underlying attachment model
+(repository-scoped, persists across every task of the project) is untouched.
+
+- `components/RepositoryUploads.tsx` split into a hook (`useRepositoryUploads`,
+  now tolerates an undefined `repositoryId` while the task is still loading)
+  plus two small UI pieces: `AttachFilesButton` (icon button + hidden file
+  input) and `AttachedFilesChips` (the chip list). Replaces the previous
+  single self-contained component.
+- **TaskDetail.tsx**: removed the standalone "Reference files" strip below
+  the topbar. `AttachFilesButton` now sits as the last icon in the
+  instruction textarea's Markdown toolbar (after Bold/Italic/code/.../•,
+  past a thin divider); `AttachedFilesChips` renders directly above the
+  textarea, so attached files appear right where the message is written —
+  same layout pattern as a GitHub Issue comment box.
+- **TaskCreate.tsx**: kept its existing labeled-row placement (no per-message
+  toolbar exists on this screen, since no instruction is being composed yet)
+  but now uses the same shared hook/components.
+
+**Verified:** typecheck + production build clean; browser-verified
+end-to-end — uploaded `docs/samples/sample-spec.xlsx` via the new toolbar
+button on a live task, the chip appeared above the textarea labeled
+"Reference files", and the DB row confirmed it was still saved
+repository-scoped (`uploads.repository_id`) at the corrected non-`/tmp` path;
+TaskCreate screenshot confirmed the button/label still render once a
+repository is selected.
+
+Docs: getting-started (EN/JA) Step 8-2 rewritten for the new button location
+(toolbar, not a separate strip) and the "attached above the textarea" chip
+behavior; spec.md §5.3 documents the new component split and the design
+rationale.
+
+### Docs: dedicated file-upload instructions
+
+The 📎 attach-file feature (Sprint 2) only ever had a one-line tip buried in
+the task-creation step; there was no standalone walkthrough of where the
+button appears or how to use it. Promoted it to its own step in both guides:
+**"Step 8-2 — Attach a specification file"** (EN) / **「手順8-2｜仕様書ファイルを添付する」**
+(JA). Covers: which screens/tabs show the 📎 button and under what condition
+(repository must be selected/set), the attach/remove steps, the bundled
+`docs/samples/sample-spec.xlsx` sample, and a troubleshooting note (confirm a
+repository is set; hard-refresh in case of a stale cached page).
+
+### Ops: upload/task data path was defaulting under /tmp (data-loss risk)
+
+`backend/.env` set `TASK_DATA_PATH` but never `UPLOAD_DATA_PATH`, so it fell
+back to `config.py`'s default `/tmp/xolvien/uploads` for host-run (non-Docker)
+backends — and `/tmp` is cleared on reboot / swept by systemd-tmpfiles on
+Linux. This had already caused real data loss: two `uploads` DB rows
+referenced `/tmp/xolvien/uploads/repos/{2,4}/...` files that no longer
+existed. Moved both paths under the repo (`TASK_DATA_PATH`/`UPLOAD_DATA_PATH`
+now point at `var/tasks`/`var/uploads`, outside `/tmp` entirely) and deleted
+the two orphaned `uploads` rows (no recovery possible; the underlying bytes
+were gone). The bundled `docs/samples/sample-spec.xlsx` is unaffected
+(tracked in git) and can be re-uploaded to continue testing.
+
 ### Sprint 3 step 3.3 — HTML/Excel renderer + render endpoint
 
 One generic, doc-type-agnostic renderer per output format
