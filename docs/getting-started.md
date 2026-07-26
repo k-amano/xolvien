@@ -725,8 +725,22 @@ create for this project can reuse the same attachment without re-uploading.
 2. Choose one or more files in the file picker. Upload starts immediately — no separate "confirm" step.
 3. Once uploaded, each file appears as a chip labeled "Reference files" **directly above the text area**, with its name. Click the **×** on a chip to remove it.
 
-Attached files are copied into the task container automatically on the next
-Claude run (clarify / execute) — there is nothing further to do.
+**You choose which files each message references.** Click a chip body to toggle it:
+
+| Chip | Meaning |
+|---|---|
+| **✓ solid border** | Referenced by the next message you send (default; new uploads start ON) |
+| **○ dashed, dimmed** | Stored with the project, but not referenced by the next message |
+
+The selected files are copied into the task container automatically on the
+next Claude run (clarify / execute) — there is nothing further to do.
+
+When you start requirement clarification with reference files selected,
+Claude **reads them first** and will not ask about anything they already
+specify. If there is no proof it read them, the run stops with a visible
+"The AI did not read the reference files" error — clarification can never
+proceed without the spec. There is no file-size limit: large files are read
+in parts, as needed.
 
 > **If you don't see the 📎 button on the task detail screen:** confirm the
 > instruction box is showing the **Write** tab (not Preview) and that the
@@ -1273,13 +1287,18 @@ Someone else may have pushed to the same branch. Delete the task and recreate it
 
 ## Claude Code CLI authentication error in logs
 
-If authentication-related errors appear in the log area, the host Claude Code CLI credentials may be the issue.
+If the "**AI authentication failed**" error banner appears, the host Claude
+Code CLI credentials (token) have been revoked or expired.
 
-Verify on your host:
+The host credentials are **re-copied into the container automatically on
+every Claude run**, so no container-side action is needed — re-logging in on
+the host is enough.
 
 ```bash
 claude --version        # check that a version number appears
 ls ~/.claude/           # check that credential files exist
+claude                  # launch it and re-login with /login
 ```
 
-If credentials are missing, run `claude` and log in again.
+After re-logging in, just run the action again in the app. There is no need
+to recreate the task or the container.

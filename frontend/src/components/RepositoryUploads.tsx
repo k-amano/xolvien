@@ -19,15 +19,23 @@ import { useLang } from '../i18n'
 export function useRepositoryUploads(repositoryId: number | undefined) {
   const { t } = useLang()
   const [uploads, setUploads] = useState<Upload[]>([])
+  // Which uploads the NEXT message will reference. Files stay stored with the
+  // repository either way; this only controls what gets attached per message.
+  // New/loaded files default to selected (ON).
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (!repositoryId) { setUploads([]); return }
+    if (!repositoryId) { setUploads([]); setSelectedIds(new Set()); return }
     let cancelled = false
     getRepositoryUploads(repositoryId)
-      .then(u => { if (!cancelled) setUploads(u) })
+      .then(u => {
+        if (cancelled) return
+        setUploads(u)
+        setSelectedIds(new Set(u.map(x => x.id)))
+      })
       .catch(() => { /* empty/missing is fine */ })
     return () => { cancelled = true }
   }, [repositoryId])
@@ -39,6 +47,7 @@ export function useRepositoryUploads(repositoryId: number | undefined) {
     try {
       const added = await uploadRepositoryFiles(repositoryId, Array.from(fileList))
       setUploads(prev => [...prev, ...added])
+      setSelectedIds(prev => new Set([...prev, ...added.map(a => a.id)]))
     } catch {
       setError(t.uploadFailed)
     } finally {
@@ -52,12 +61,22 @@ export function useRepositoryUploads(repositoryId: number | undefined) {
     try {
       await deleteRepositoryUpload(repositoryId, uploadId)
       setUploads(prev => prev.filter(u => u.id !== uploadId))
+      setSelectedIds(prev => { const next = new Set(prev); next.delete(uploadId); return next })
     } catch {
       setError(t.uploadDeleteFailed)
     }
   }
 
-  return { uploads, busy, error, inputRef, handleFiles, handleRemove }
+  function toggleSelect(uploadId: number) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(uploadId)) next.delete(uploadId)
+      else next.add(uploadId)
+      return next
+    })
+  }
+
+  return { uploads, selectedIds, toggleSelect, busy, error, inputRef, handleFiles, handleRemove }
 }
 
 export type RepositoryUploadsState = ReturnType<typeof useRepositoryUploads>
@@ -121,33 +140,48 @@ export function AttachedFilesChips({ state, compact }: { state: RepositoryUpload
           <span style={{ fontSize: '0.72rem', color: '#6e7681', alignSelf: 'center' }}>
             {t.repoAttachments}:
           </span>
-          {state.uploads.map(u => (
-            <span
-              key={u.id}
-              title={`${u.filename} · ${formatSize(u.size)}`}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: '6px',
-                background: '#0d1117', border: '1px solid #30363d', borderRadius: '14px',
-                padding: compact ? '2px 8px' : '4px 10px', fontSize: '0.78rem', color: '#c9d1d9',
-                maxWidth: '220px',
-              }}
-            >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {u.filename}
-              </span>
-              <button
-                type="button"
-                onClick={() => state.handleRemove(u.id)}
-                title={t.uploadRemove}
+          {state.uploads.map(u => {
+            const selected = state.selectedIds.has(u.id)
+            return (
+              <span
+                key={u.id}
+                role="checkbox"
+                aria-checked={selected}
+                onClick={() => state.toggleSelect(u.id)}
+                title={`${u.filename} · ${formatSize(u.size)} — ${selected ? t.uploadRefOn : t.uploadRefOff}`}
                 style={{
-                  background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer',
-                  fontSize: '0.9rem', lineHeight: 1, padding: 0,
+                  display: 'inline-flex', alignItems: 'center', gap: '6px',
+                  background: selected ? '#0d1117' : 'transparent',
+                  border: selected ? '1px solid #388bfd' : '1px dashed #30363d',
+                  borderRadius: '14px',
+                  padding: compact ? '2px 8px' : '4px 10px', fontSize: '0.78rem',
+                  color: selected ? '#c9d1d9' : '#6e7681',
+                  opacity: selected ? 1 : 0.6,
+                  maxWidth: '220px',
+                  cursor: 'pointer',
+                  userSelect: 'none',
                 }}
               >
-                ×
-              </button>
-            </span>
-          ))}
+                <span aria-hidden style={{ fontSize: '0.72rem', lineHeight: 1 }}>
+                  {selected ? '✓' : '○'}
+                </span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {u.filename}
+                </span>
+                <button
+                  type="button"
+                  onClick={e => { e.stopPropagation(); state.handleRemove(u.id) }}
+                  title={t.uploadRemove}
+                  style={{
+                    background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer',
+                    fontSize: '0.9rem', lineHeight: 1, padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            )
+          })}
         </div>
       )}
     </div>

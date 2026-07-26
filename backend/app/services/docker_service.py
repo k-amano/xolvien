@@ -101,28 +101,7 @@ class DockerService:
             # Copy only the credentials file into the xolvien user's home so
             # Claude Code CLI can authenticate without inheriting host backups,
             # history, or other unrelated files from ~/.claude/
-            credentials_src = str(Path.home() / ".claude" / ".credentials.json")
-            if os.path.exists(credentials_src):
-                with open(credentials_src, "rb") as f:
-                    creds_data = f.read()
-                import tarfile, io
-                # Ensure the target directory exists before put_archive
-                container.exec_run(
-                    ["bash", "-c", "mkdir -p /home/xolvien/.claude"],
-                    workdir="/workspace",
-                )
-                tar_buf = io.BytesIO()
-                with tarfile.open(fileobj=tar_buf, mode='w') as tar:
-                    info = tarfile.TarInfo(name='.credentials.json')
-                    info.size = len(creds_data)
-                    info.mode = 0o600
-                    tar.addfile(info, io.BytesIO(creds_data))
-                tar_buf.seek(0)
-                container.put_archive('/home/xolvien/.claude/', tar_buf)
-                container.exec_run(
-                    ["bash", "-c", "chown -R xolvien:xolvien /home/xolvien/.claude"],
-                    workdir="/workspace",
-                )
+            self.refresh_claude_credentials(container.id)
 
             # Grant ownership of cloned repo to xolvien user (for agent mode)
             container.exec_run(
@@ -146,6 +125,39 @@ class DockerService:
             except:
                 pass
             raise RuntimeError(f"Failed to create workspace container: {e}")
+
+    def refresh_claude_credentials(self, container_id: str) -> None:
+        """
+        Copy the host's CURRENT Claude credentials file into the container.
+
+        OAuth access tokens rotate: the copy made at container creation goes
+        stale in long-lived containers, and the CLI then fails with
+        401 "OAuth access token has been revoked". This is therefore called
+        before every Claude flow (see ``ClaudeCodeService._write_runner``),
+        not just at container creation, so runs always use the host's
+        freshest credentials.
+
+        A missing host file is not an error here — the CLI itself will fail
+        with a clear auth error that the stream result check surfaces.
+        """
+        credentials_src = Path.home() / ".claude" / ".credentials.json"
+        if not credentials_src.exists():
+            return
+        creds_data = credentials_src.read_bytes()
+        container = self.client.containers.get(container_id)
+        # Ensure the target directory exists before put_archive
+        container.exec_run(["bash", "-c", "mkdir -p /home/xolvien/.claude"])
+        tar_buf = io.BytesIO()
+        with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=".credentials.json")
+            info.size = len(creds_data)
+            info.mode = 0o600
+            tar.addfile(info, io.BytesIO(creds_data))
+        tar_buf.seek(0)
+        container.put_archive("/home/xolvien/.claude/", tar_buf)
+        container.exec_run(
+            ["bash", "-c", "chown -R xolvien:xolvien /home/xolvien/.claude"]
+        )
 
     def ensure_container_running(self, container_id: str) -> None:
         """Start the container if it is stopped."""

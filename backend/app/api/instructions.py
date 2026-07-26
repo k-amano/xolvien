@@ -104,7 +104,9 @@ async def execute_instruction_stream(
     return _logged_stream(
         task_id,
         "execute",
-        claude_service.execute_instruction(db, task_id, instruction_data.content),
+        claude_service.execute_instruction(
+            db, task_id, instruction_data.content, instruction_data.upload_ids
+        ),
     )
 
 
@@ -182,7 +184,8 @@ async def clarify_requirements_stream(
         task_id,
         "clarify",
         claude_service.clarify_requirements(
-            db, task_id, data.instruction, [m.model_dump() for m in data.history], data.lang
+            db, task_id, data.instruction, [m.model_dump() for m in data.history],
+            data.lang, data.upload_ids,
         ),
     )
 

@@ -20,7 +20,11 @@ class ErrorCode(str, Enum):
     CONTAINER_NOT_RUNNING = "CONTAINER_NOT_RUNNING"
     TIMEOUT = "TIMEOUT"
     CLAUDE_API_ERROR = "CLAUDE_API_ERROR"
+    CLAUDE_AUTH_FAILED = "CLAUDE_AUTH_FAILED"
+    CLAUDE_CLI_ERROR = "CLAUDE_CLI_ERROR"
     CLAUDE_PERMISSION_LOOP = "CLAUDE_PERMISSION_LOOP"
+    UPLOAD_NOT_AVAILABLE = "UPLOAD_NOT_AVAILABLE"
+    SPEC_NOT_READ = "SPEC_NOT_READ"
     GIT_AUTH_FAILED = "GIT_AUTH_FAILED"
     GIT_PUSH_REJECTED = "GIT_PUSH_REJECTED"
     TEST_INFRA_ERROR = "TEST_INFRA_ERROR"
@@ -50,6 +54,9 @@ _RULES: list[tuple[ErrorCode, re.Pattern[str]]] = [
      re.compile(r"not running|no container|container .* not found|did not start", re.I)),
     (ErrorCode.CLAUDE_PERMISSION_LOOP,
      re.compile(r"repeated .* times|aborting to prevent infinite loop", re.I)),
+    (ErrorCode.CLAUDE_AUTH_FAILED,
+     re.compile(r"oauth.*(revoked|expired)|authentication_error|failed to authenticate"
+                r"|invalid (api |x-api-)key|please run /login|not logged in", re.I)),
     (ErrorCode.GIT_AUTH_FAILED,
      re.compile(r"authentication failed|could not read username|permission denied \(publickey\)|fatal: could not read", re.I)),
     (ErrorCode.GIT_PUSH_REJECTED,

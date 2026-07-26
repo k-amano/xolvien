@@ -202,6 +202,8 @@ export const ja = {
   uploadFailed: 'アップロードに失敗しました',
   uploadDeleteFailed: 'ファイルの削除に失敗しました',
   repoAttachments: '参照ファイル',
+  uploadRefOn: 'このメッセージで参照します（クリックで外す）',
+  uploadRefOff: '参照しません（クリックで含める）',
   generatePromptDirect: 'プロンプトを生成',
   confirmRequirements: '要件を確認する',
   emptyState: '指示を入力して開始してください',

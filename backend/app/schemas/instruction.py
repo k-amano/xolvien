@@ -50,6 +50,9 @@ class ClarifyRequest(BaseModel):
     instruction: str
     history: List[ChatMessage] = []
     lang: str = "ja"
+    # Which repository uploads this message references. None = all uploads
+    # (backward compatible); [] = none; otherwise the selected upload ids.
+    upload_ids: Optional[List[int]] = None
 
 
 class InstructionBase(BaseModel):
@@ -61,7 +64,8 @@ class InstructionBase(BaseModel):
 class InstructionCreate(InstructionBase):
     """Instruction creation schema."""
 
-    pass
+    # See ClarifyRequest.upload_ids — same semantics for execution.
+    upload_ids: Optional[List[int]] = None
 
 
 class InstructionResponse(InstructionBase):

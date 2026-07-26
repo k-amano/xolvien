@@ -25,10 +25,30 @@ const ja: Record<ErrorCode, ErrorCopy> = {
     cause: 'Claude との通信が一時的に失敗しました。',
     actions: ['少し待ってからもう一度実行してください'],
   },
+  CLAUDE_AUTH_FAILED: {
+    title: 'AI の認証に失敗しました',
+    cause: '作業環境内の Claude Code CLI の認証情報が無効になっています（トークンの失効など）。',
+    actions: ['コンテナ内の Claude CLI で再ログインして認証情報を更新してください', '再認証後にもう一度実行してください'],
+  },
+  CLAUDE_CLI_ERROR: {
+    title: 'AI処理が異常終了しました',
+    cause: 'Claude Code CLI が結果を返さずに終了しました。',
+    actions: ['もう一度実行してください', '続く場合は左ペインのログで詳細を確認してください'],
+  },
   CLAUDE_PERMISSION_LOOP: {
     title: '権限エラーで処理を中断しました',
     cause: 'ファイル権限の問題で同じエラーが繰り返されたため、安全のため停止しました。',
     actions: ['「Reset & Rebuild」で作業環境を作り直してください', '再発する場合はコンテナを再作成してください'],
+  },
+  UPLOAD_NOT_AVAILABLE: {
+    title: '参照ファイルを利用できません',
+    cause: '選択された参照ファイルを作業環境に配置できませんでした（削除済み・コピー失敗などの可能性）。',
+    actions: ['参照ファイルの一覧を確認し、必要なら再アップロードしてください', 'もう一度実行してください'],
+  },
+  SPEC_NOT_READ: {
+    title: 'AIが参照ファイルを読みませんでした',
+    cause: '参照ファイルが指定されていますが、AIの応答に読了マーカーがなく、仕様を読まずに進もうとしたため中断しました。',
+    actions: ['もう一度実行してください', '繰り返す場合は左ペインのログを確認してください'],
   },
   GIT_AUTH_FAILED: {
     title: 'Git の認証に失敗しました',
@@ -73,10 +93,30 @@ const en: Record<ErrorCode, ErrorCopy> = {
     cause: 'Communication with Claude failed temporarily.',
     actions: ['Wait a moment and try again'],
   },
+  CLAUDE_AUTH_FAILED: {
+    title: 'AI authentication failed',
+    cause: 'The Claude Code CLI credentials inside the workspace are invalid (e.g. a revoked or expired token).',
+    actions: ['Re-login the Claude CLI inside the container to refresh its credentials', 'Then try again'],
+  },
+  CLAUDE_CLI_ERROR: {
+    title: 'AI processing ended abnormally',
+    cause: 'The Claude Code CLI exited without returning a result.',
+    actions: ['Try again', 'If it continues, check the log in the left pane'],
+  },
   CLAUDE_PERMISSION_LOOP: {
     title: 'Stopped due to a permission error',
     cause: 'A file-permission problem caused the same error to repeat, so it was stopped for safety.',
     actions: ['Use "Reset & Rebuild" to recreate the workspace', 'If it recurs, recreate the container'],
+  },
+  UPLOAD_NOT_AVAILABLE: {
+    title: 'Reference files unavailable',
+    cause: 'The selected reference files could not be placed into the workspace (possibly deleted or the copy failed).',
+    actions: ['Check the reference file list and re-upload if needed', 'Try again'],
+  },
+  SPEC_NOT_READ: {
+    title: 'The AI did not read the reference files',
+    cause: 'Reference files were selected, but the response carried no proof-of-read marker, so the run was stopped rather than proceeding without the spec.',
+    actions: ['Try again', 'If it repeats, check the log in the left pane'],
   },
   GIT_AUTH_FAILED: {
     title: 'Git authentication failed',

@@ -45,6 +45,12 @@ interface StepInfo {
 }
 
 
+// The clarify flow's proof-of-read marker (emitted when reference files are
+// selected) is a protocol detail — strip it from all user-visible text.
+function stripSpecMarker(s: string): string {
+  return s.replace(/\[XOLVIEN_SPEC_READ\]\s*/g, '')
+}
+
 function getStatusClass(status: TaskStatus): string {
   switch (status) {
     case 'pending':
@@ -571,6 +577,26 @@ export default function TaskDetail() {
     setInstruction(msgToUse)
   }
 
+  // Client-side line of defense for streamed Claude flows: even when the HTTP
+  // stream ends "successfully", the run only counts as a success if the CLI's
+  // terminal `result` line proved it (is_error:false) AND some assistant text
+  // was produced. Anything else is routed to the error banner + an error chat
+  // card — a failure must never end as a silent blank pane.
+  // displayText overrides the emptiness check (e.g. clarify passes its
+  // marker-stripped text so a marker-only response still counts as empty).
+  function failStreamIfBad(router: ReturnType<typeof createStreamJsonRouter>, displayText?: string): boolean {
+    const outcome = router.outcome()
+    const empty = !(displayText ?? router.text()).trim()
+    if (outcome.ok && !empty) return false
+    const code = outcome.ok ? 'UNKNOWN' : outcome.code
+    setActiveError(code)
+    logErrorDetail(outcome.detail || 'Stream completed but produced no assistant text')
+    setChatEntries(prev => prev.map((e, i) =>
+      i === streamingEntryIndexRef.current ? { type: 'error', code } : e
+    ))
+    return true
+  }
+
   async function handleStartClarify(overrideMsg?: string) {
     const userMsg = overrideMsg ?? instruction.trim()
     if (!userMsg || clarifying || generating) return
@@ -595,10 +621,11 @@ export default function TaskDetail() {
       taskId,
       userMsg,
       [],
+      Array.from(repoUploads.selectedIds),
       (chunk) => {
         // Left pane: raw stream-json verbatim. Right pane: reconstructed text.
         const { raw } = router.push(chunk)
-        streamedText = router.text()
+        streamedText = stripSpecMarker(router.text())
         setLogEntries(prev => prev.map(e =>
           e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + raw, started: true } : e
         ))
@@ -611,7 +638,8 @@ export default function TaskDetail() {
       () => {
         setClarifying(false)
         recordPhaseDuration('clarify', Date.now() - phaseStartMs)
-        streamedText = router.text()
+        streamedText = stripSpecMarker(router.text())
+        if (failStreamIfBad(router, streamedText)) return
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\r?\n+/, '')
           setChatEntries(prev => prev.map((e, i) =>
@@ -671,9 +699,10 @@ export default function TaskDetail() {
       taskId,
       (chatEntries.find(e => e.type === 'user_instruction') as { content: string } | undefined)?.content ?? '',
       newHistory,
+      Array.from(repoUploads.selectedIds),
       (chunk) => {
         const { raw } = router.push(chunk)
-        streamedText = router.text()
+        streamedText = stripSpecMarker(router.text())
         setLogEntries(prev => prev.map(e =>
           e.kind === 'stream' && e.key === clarifyKey ? { ...e, text: e.text + raw, started: true } : e
         ))
@@ -686,7 +715,8 @@ export default function TaskDetail() {
       () => {
         setClarifying(false)
         recordPhaseDuration('clarify', Date.now() - phaseStartMs)
-        streamedText = router.text()
+        streamedText = stripSpecMarker(router.text())
+        if (failStreamIfBad(router, streamedText)) return
         if (streamedText.startsWith('PROMPT_READY')) {
           const prompt = streamedText.replace(/^PROMPT_READY\r?\n+/, '')
           setChatEntries(prev => prev.map((e, i) =>
@@ -801,6 +831,7 @@ export default function TaskDetail() {
         const cleaned = router.text().trim()
         setGenerating(false)
         recordPhaseDuration('generate_prompt', Date.now() - phaseStartMs)
+        if (failStreamIfBad(router)) return
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
@@ -856,6 +887,7 @@ export default function TaskDetail() {
         const cleaned = router.text().trim()
         setGenerating(false)
         recordPhaseDuration('generate_prompt', Date.now() - phaseStartMs)
+        if (failStreamIfBad(router)) return
         setInstruction('')
         setChatEntries(prev => prev.map((e, i) =>
           i === streamingEntryIndexRef.current
@@ -895,6 +927,7 @@ export default function TaskDetail() {
     await executeInstructionStream(
       taskId,
       prompt,
+      Array.from(repoUploads.selectedIds),
       (chunk) => {
         setLogEntries(prev => prev.map(entry =>
           entry.kind === 'stream' && entry.key === currentKey

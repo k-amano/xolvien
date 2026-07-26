@@ -17,6 +17,7 @@ from app.models.test_case_result import TestCaseResult, Verdict
 from app.services.docker_service import get_docker_service
 from app.services import document_converter
 from app.services.document_service import schedule_generation
+from app.errors import ErrorCode, XolvienError, classify_text
 
 # Unified RAW stream-json runner for ALL streamed Claude flows (clarify, prompt
 # generation, test code-gen, test auto-fix, execute).
@@ -49,6 +50,7 @@ except Exception:
     flags = {}
 skip_permissions = bool(flags.get('skip_permissions', False))
 drop_privs_flag = bool(flags.get('drop_privs', False))
+add_dirs = flags.get('add_dirs') or []
 
 try:
     pw = pwd.getpwnam('xolvien')
@@ -73,6 +75,10 @@ if uid is not None and drop_privs_flag:
 cmd = ['claude']
 if skip_permissions:
     cmd.append('--dangerously-skip-permissions')
+# Grant READ access to extra directories (e.g. /workspace/uploads for the
+# clarify flow) without enabling full tool permissions.
+for d in add_dirs:
+    cmd += ['--add-dir', d]
 cmd += ['-p', prompt, '--output-format', 'stream-json',
         '--include-partial-messages', '--verbose']
 
@@ -266,24 +272,150 @@ class ClaudeCodeService:
         )
         self.docker_service.execute_command(container_id, cmd, "/workspace")
 
-    def _write_runner(self, container_id: str, *, skip_permissions: bool, drop_privs: bool) -> None:
+    def _write_runner(
+        self,
+        container_id: str,
+        *,
+        skip_permissions: bool,
+        drop_privs: bool,
+        add_dirs: list[str] | None = None,
+    ) -> None:
         """
         Install the unified raw stream-json runner plus its auth flags file.
 
         skip_permissions / drop_privs select the per-flow Claude invocation:
           clarify        -> skip_permissions=False, drop_privs=False (root, no tools)
           prompt/execute/test -> skip_permissions=True, drop_privs=True (full tools)
+        add_dirs grants READ access to extra directories (clarify uses it for
+        /workspace/uploads so reference files are readable without full perms).
         """
+        # Re-copy the host's current Claude credentials on EVERY run: OAuth
+        # tokens rotate, and the snapshot taken at container creation goes
+        # stale in long-lived containers (401 "token has been revoked").
+        self.docker_service.refresh_claude_credentials(container_id)
         self._write_text_to_container(
             container_id, "/tmp/xolvien_runner_flags.json",
-            json.dumps({"skip_permissions": skip_permissions, "drop_privs": drop_privs}),
+            json.dumps({
+                "skip_permissions": skip_permissions,
+                "drop_privs": drop_privs,
+                "add_dirs": add_dirs or [],
+            }),
         )
         self._write_text_to_container(container_id, "/tmp/xolvien_runner.py", _RUNNER_SCRIPT_STREAM)
 
-    async def _prepare_uploads(self, db: AsyncSession, task: Task, lang: str = "ja") -> str:
+    async def _stream_runner_checked(
+        self,
+        container_id: str,
+        workdir: str = "/workspace/repo",
+        chunk_timeout: float = 120.0,
+        text_sink: list[str] | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Run the raw stream-json runner and PROVE that it succeeded.
+
+        Chunks stream through unmodified (the left pane is a raw view) while
+        complete JSON lines are inspected on the side. Success requires a
+        terminal ``result`` line with ``is_error: false`` — the CLI emits one
+        for every completed run. Every other ending raises XolvienError so the
+        streaming endpoint appends the ``[[XOLVIEN_ERROR:CODE]]`` sentinel and
+        the UI shows a prominent error banner:
+
+        - ``result`` with ``is_error: true`` (e.g. revoked OAuth token — the
+          CLI then produces NO text_delta events at all, so without this check
+          the run would end silently with a blank right pane)
+        - the runner's own ``_xolvien_error`` loop-abort
+        - the stream ending with no ``result`` line (CLI crash/startup failure)
+
+        When ``text_sink`` is given, every text_delta fragment is appended to
+        it so the caller can inspect the reconstructed assistant text (e.g.
+        the clarify flow's proof-of-read marker check).
+        """
+        line_carry = ""
+        saw_result = False
+        result_is_error = False
+        result_text = ""
+        runner_error = ""
+        tail = ""  # recent raw output, used as detail when no result line arrives
+
+        def inspect(line: str) -> None:
+            nonlocal saw_result, result_is_error, result_text, runner_error
+            s = line.strip()
+            if not s:
+                return
+            try:
+                obj = json.loads(s)
+            except Exception:
+                return
+            if not isinstance(obj, dict):
+                return
+            if obj.get("type") == "result":
+                saw_result = True
+                result_is_error = bool(obj.get("is_error"))
+                result_text = str(obj.get("result") or obj.get("error") or "")
+            elif obj.get("type") == "_xolvien_error":
+                runner_error = str(obj.get("message") or "runner aborted")
+            elif obj.get("type") == "stream_event" and text_sink is not None:
+                ev = obj.get("event") or {}
+                if ev.get("type") == "content_block_delta":
+                    delta = ev.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        text_sink.append(str(delta.get("text", "")))
+
+        async for chunk in self.docker_service.execute_command_stream(
+            container_id,
+            "python3 /tmp/xolvien_runner.py",
+            workdir,
+            chunk_timeout=chunk_timeout,
+        ):
+            yield chunk
+            tail = (tail + chunk)[-2000:]
+            combined = line_carry + chunk
+            parts = combined.split("\n")
+            line_carry = parts.pop()
+            for line in parts:
+                inspect(line)
+        inspect(line_carry)
+
+        if runner_error:
+            code = classify_text(runner_error)
+            raise XolvienError(
+                code if code != ErrorCode.UNKNOWN else ErrorCode.CLAUDE_CLI_ERROR,
+                runner_error,
+            )
+        if saw_result and result_is_error:
+            detail = result_text or "Claude CLI reported an error result"
+            code = classify_text(detail)
+            raise XolvienError(
+                code if code != ErrorCode.UNKNOWN else ErrorCode.CLAUDE_API_ERROR,
+                detail,
+            )
+        if not saw_result:
+            raise XolvienError(
+                ErrorCode.CLAUDE_CLI_ERROR,
+                "Claude CLI ended without a result line (crash or startup "
+                f"failure). Last output: {tail[-500:]}",
+            )
+
+    async def _prepare_uploads(
+        self,
+        db: AsyncSession,
+        task: Task,
+        lang: str = "ja",
+        upload_ids: list[int] | None = None,
+    ) -> str:
         """
         Copy the task's repository uploads into the container and return a prompt
-        fragment listing them. Returns "" when there are no uploads.
+        fragment listing them. Returns "" when there are no uploads to prepare.
+
+        upload_ids selects WHICH uploads this message references:
+          None -> all repository uploads (backward compatible)
+          []   -> none (user deselected everything)
+          ids  -> only those uploads; a missing id is an ERROR, not a silent
+                  skip — the user explicitly asked for that file.
+
+        Likewise, when there are uploads to prepare but none could be placed
+        into the container, this raises instead of silently returning "" —
+        a run must never quietly proceed without its reference files.
 
         Uploads are repository-scoped, so they are available to every fix-task of
         the project and re-copied on each call (surviving Reset & Rebuild).
@@ -291,10 +423,22 @@ class ClaudeCodeService:
         from app.models.upload import Upload  # local import avoids a cycle
         from app.config import get_settings
 
-        result = await db.execute(
-            select(Upload).where(Upload.repository_id == task.repository_id).order_by(Upload.created_at)
-        )
+        if upload_ids is not None and not upload_ids:
+            return ""
+
+        query = select(Upload).where(Upload.repository_id == task.repository_id)
+        if upload_ids is not None:
+            query = query.where(Upload.id.in_(upload_ids))
+        result = await db.execute(query.order_by(Upload.created_at))
         uploads = result.scalars().all()
+
+        if upload_ids is not None:
+            missing = set(upload_ids) - {u.id for u in uploads}
+            if missing:
+                raise XolvienError(
+                    ErrorCode.UPLOAD_NOT_AVAILABLE,
+                    f"selected upload id(s) not found in repository: {sorted(missing)}",
+                )
         if not uploads:
             return ""
 
@@ -312,10 +456,16 @@ class ClaudeCodeService:
             copied = self.docker_service.copy_uploads_to_container(
                 task.container_id, host_dir, "/workspace/uploads"
             )
-        except Exception:
-            copied = []
+        except Exception as e:
+            raise XolvienError(
+                ErrorCode.UPLOAD_NOT_AVAILABLE,
+                f"failed to copy reference files into the container: {e}",
+            )
         if not copied:
-            return ""
+            raise XolvienError(
+                ErrorCode.UPLOAD_NOT_AVAILABLE,
+                "no reference files could be placed into the container",
+            )
 
         # Map stored filenames (id_originalname) back to original display names.
         by_stored = {f"{u.id}_{os.path.basename(u.filename)}": u.filename for u in uploads}
@@ -381,11 +531,19 @@ class ClaudeCodeService:
         instruction: str,
         history: list,
         lang: str = "ja",
+        upload_ids: list[int] | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Conduct a clarification Q&A session before prompt generation.
         Claude either asks questions or outputs PROMPT_READY\\n{prompt}.
-        Uses -p mode (text only) — file reading is deferred to generate_prompt.
+
+        When reference files are selected (upload_ids), the CLI gets read-only
+        access to /workspace/uploads via --add-dir and MUST prove it read them
+        by emitting a [XOLVIEN_SPEC_READ] marker — a response without the
+        marker aborts with SPEC_NOT_READ instead of quietly interviewing the
+        user with questions the spec already answers. Uploads are expected to
+        be larger than the context window, so their content is never embedded
+        in the prompt; Claude reads the relevant parts via the Read tool.
         """
         result = await db.execute(sa_select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
@@ -406,8 +564,9 @@ class ClaudeCodeService:
             "/workspace/repo",
         )
 
-        # Repository-level uploaded reference files (specs, design docs, mockups)
-        uploads_section = await self._prepare_uploads(db, task, lang)
+        # Repository-level uploaded reference files (specs, design docs, mockups),
+        # limited to the ones this message selected.
+        uploads_section = await self._prepare_uploads(db, task, lang, upload_ids)
 
         # Build conversation history text
         history_text = ""
@@ -457,7 +616,7 @@ Options:
 - [Option C]
 ```
 
-Always start with this question first (unless the conversation history shows it was already answered):
+Always start with this question first (unless the conversation history or the reference files already answer it):
 - Question: What programming language and framework should be used?
 - Options must include concrete choices (e.g. "Vanilla HTML/CSS/JS", "React", "Vue", "TypeScript")
 
@@ -507,7 +666,7 @@ README:
 - [選択肢C]
 ```
 
-会話履歴に回答済みでない限り、最初に必ずこの質問から始めてください：
+会話履歴で回答済み、または参照ファイルに記載済みでない限り、最初に必ずこの質問から始めてください：
 - 質問：使用するプログラミング言語とフレームワークは何ですか？
 - 選択肢には具体的な候補（例：「Vanilla HTML/CSS/JS」「React」「Vue」「TypeScript」）を含めること
 
@@ -520,17 +679,53 @@ README:
 説明や前置きは不要です。質問自体に番号をつけないこと。
 """
 
-        self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", clarify_prompt)
-        # clarify is read-only Q&A: run as root (HOME=xolvien), no tools.
-        self._write_runner(task.container_id, skip_permissions=False, drop_privs=False)
+        # Reference-file protocol: only added when files are actually selected.
+        # Read access is granted via --add-dir below; the marker proves it.
+        if uploads_section:
+            if lang == "en":
+                clarify_prompt += """
+## Reference files (MUST DO FIRST)
 
-        async for chunk in self.docker_service.execute_command_stream(
+- BEFORE asking anything, read the reference files listed above (use the converted Markdown). For large files, grasp the structure first, then read the sections relevant to the user's instruction.
+- After reading, output `[XOLVIEN_SPEC_READ]` alone on the FIRST line of your response, then write your question. A response without this marker is treated as a failure.
+- Never ask about anything the reference files already specify (language, framework, features, screens, etc.). Treat their contents as decided; ask only about points they leave open.
+"""
+            else:
+                clarify_prompt += """
+## 参照ファイルの取り扱い（最初に必ず実行）
+
+- 質問する前に、上記の参照ファイルを読むこと（変換済みMarkdownを使うこと）。大きなファイルはまず構成を把握し、依頼に関係する部分を読むこと。
+- 読み終えたら、応答の1行目に `[XOLVIEN_SPEC_READ]` を単独で出力し、その後に質問を書くこと。このマーカーがない応答は失敗として扱われる。
+- 参照ファイルに記載済みの事項（言語・フレームワーク・機能・画面構成など）は質問しないこと。記載内容は確定事項として扱い、記載のない不明点のみ質問すること。
+"""
+
+        self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", clarify_prompt)
+        # clarify is read-only Q&A: run as root (HOME=xolvien), no write tools.
+        # When reference files are selected, grant READ access to the uploads
+        # directory (it is outside the CLI's working dir /workspace/repo).
+        self._write_runner(
             task.container_id,
-            "python3 /tmp/xolvien_runner.py",
-            "/workspace/repo",
-            chunk_timeout=120.0,
+            skip_permissions=False,
+            drop_privs=False,
+            add_dirs=(["/workspace/uploads"] if uploads_section else None),
+        )
+
+        # Collect the assistant's text so we can VERIFY the proof-of-read
+        # marker — with reference files selected, a marker-less response means
+        # Claude skipped the spec, and we abort loudly rather than let it
+        # interview the user blind.
+        sink: list[str] = []
+        async for chunk in self._stream_runner_checked(
+            task.container_id, chunk_timeout=120.0, text_sink=sink,
         ):
             yield chunk
+
+        if uploads_section and "[XOLVIEN_SPEC_READ]" not in "".join(sink):
+            raise XolvienError(
+                ErrorCode.SPEC_NOT_READ,
+                "reference files were selected but the response carried no "
+                "[XOLVIEN_SPEC_READ] marker — the spec was not read",
+            )
 
     async def generate_prompt(
         self,
@@ -669,11 +864,8 @@ README:
         self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", meta_prompt)
         self._write_runner(task.container_id, skip_permissions=True, drop_privs=True)
 
-        async for chunk in self.docker_service.execute_command_stream(
-            task.container_id,
-            "python3 /tmp/xolvien_runner.py",
-            "/workspace/repo",
-            chunk_timeout=120.0,
+        async for chunk in self._stream_runner_checked(
+            task.container_id, chunk_timeout=120.0,
         ):
             yield chunk
 
@@ -682,6 +874,7 @@ README:
         db: AsyncSession,
         task_id: int,
         instruction_content: str,
+        upload_ids: list[int] | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Execute instruction via Claude Code CLI agent mode inside the task container.
@@ -736,9 +929,9 @@ README:
                 [("requirements", instruction_content)], "ja",
             )
 
-            # Copy repository uploads into the container and prepend a reference
-            # to them so Claude reads the attached specs/designs during execution.
-            uploads_section = await self._prepare_uploads(db, task, "ja")
+            # Copy the SELECTED repository uploads into the container and prepend
+            # a reference to them so Claude reads them during execution.
+            uploads_section = await self._prepare_uploads(db, task, "ja", upload_ids)
             prompt_text = instruction_content
             if uploads_section:
                 yield "[SYSTEM] Attached reference files made available at /workspace/uploads/\n\n"
@@ -751,11 +944,8 @@ README:
             yield "[Claude] Running Claude Code CLI...\n\n"
 
             full_response = ""
-            async for chunk in self.docker_service.execute_command_stream(
-                task.container_id,
-                "python3 /tmp/xolvien_runner.py",
-                "/workspace/repo",
-                chunk_timeout=120.0,
+            async for chunk in self._stream_runner_checked(
+                task.container_id, chunk_timeout=120.0,
             ):
                 yield chunk
                 full_response += chunk
@@ -834,6 +1024,10 @@ README:
             await db.commit()
 
             yield f"\n[ERROR] {error_msg}\n"
+            # Re-raise so the streaming endpoint appends the error sentinel —
+            # swallowing here would end the stream "successfully" and leave the
+            # UI with no visible error.
+            raise
 
 
     async def generate_test_cases(
@@ -1014,6 +1208,8 @@ README:
         self.docker_service.execute_command(
             task.container_id, "rm -f /tmp/xolvien_session.txt", "/workspace"
         )
+        # This flow bypasses _write_runner, so refresh credentials here too.
+        self.docker_service.refresh_claude_credentials(task.container_id)
         self._write_text_to_container(
             task.container_id, "/tmp/xolvien_runner_tc.py", _RUNNER_SCRIPT_TC_BATCH
         )
@@ -1043,7 +1239,7 @@ README:
             else:
                 yield f"{tag} テストケース {start_seq}〜{end_seq} を生成しています...\n"
 
-            _, batch_output, _ = await asyncio.get_event_loop().run_in_executor(
+            batch_rc, batch_output, _ = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.docker_service.execute_command(
                     task.container_id,
@@ -1065,10 +1261,23 @@ README:
             # Parse test cases from this batch
             batch_items = self._parse_test_cases_json(batch_output)
             if not batch_items:
-                if lang == "en":
-                    yield f"{tag} ⛔ Aborted: no test cases returned in batch {batch_num}.\n"
-                else:
-                    yield f"{tag} ⛔ 中断: バッチ {batch_num} でテストケースが返されませんでした。\n"
+                # A failed CLI run (nonzero exit, e.g. revoked credentials) or a
+                # first batch with nothing usable is an ERROR, not a quiet stop —
+                # raise so the endpoint appends the error sentinel and the UI
+                # shows a banner instead of ending silently.
+                if batch_rc != 0 or tc_done_count == 0:
+                    if lang == "en":
+                        yield f"{tag} ⛔ Aborted: no test cases returned in batch {batch_num}.\n"
+                    else:
+                        yield f"{tag} ⛔ 中断: バッチ {batch_num} でテストケースが返されませんでした。\n"
+                    detail = batch_output[-1000:] or f"batch exit code {batch_rc}"
+                    code = classify_text(detail)
+                    raise XolvienError(
+                        code if code != ErrorCode.UNKNOWN else ErrorCode.CLAUDE_CLI_ERROR,
+                        detail,
+                    )
+                # Batches so far succeeded and the CLI exited cleanly with an
+                # empty batch: Claude finished early — treat as completion.
                 break
 
             # Trim batch to not exceed total_tc
@@ -1109,6 +1318,9 @@ README:
                 yield f"\n{tag} ⛔ No test cases were generated.\n"
             else:
                 yield f"\n{tag} ⛔ テストケースが生成されませんでした。\n"
+            raise XolvienError(
+                ErrorCode.CLAUDE_CLI_ERROR, "No test cases were generated"
+            )
         else:
             if lang == "en":
                 yield f"\n{tag} ✅ Done. Total: {tc_done_count} test cases\n"
@@ -1661,44 +1873,49 @@ Notes:
         assistant_text = ""
         counted_markers = 0
 
-        async for chunk in self.docker_service.execute_command_stream(
-            task.container_id,
-            "python3 /tmp/xolvien_runner.py",
-            "/workspace/repo",
-            chunk_timeout=90.0,
-        ):
-            now = datetime.utcnow()
-            # Forward the raw chunk verbatim for the left-pane (console.log) view.
-            yield chunk
-            # Reconstruct assistant text from this chunk's text_delta events.
-            for raw_line in chunk.splitlines():
-                s = raw_line.strip()
-                if not s:
-                    continue
-                try:
-                    obj = json.loads(s)
-                except Exception:
-                    continue
-                if obj.get("type") == "stream_event":
-                    ev = obj.get("event", {})
-                    if ev.get("type") == "content_block_delta":
-                        delta = ev.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            assistant_text += delta.get("text", "")
-            # Count newly-completed [XOLVIEN_TC_DONE] lines (only whole lines).
-            done_total = assistant_text.count("[XOLVIEN_TC_DONE]")
-            # Subtract a possibly-incomplete trailing marker on the last line.
-            last_line = assistant_text.rsplit("\n", 1)[-1]
-            if "[XOLVIEN_TC_DONE]" in last_line and not assistant_text.endswith("\n"):
-                done_total -= 1
-            while counted_markers < done_total:
-                counted_markers += 1
-                tc_done_count += 1
-                elapsed_ms = int((now - gen_start).total_seconds() * 1000)
-                remaining = total_tc - tc_done_count
-                avg_ms = elapsed_ms // tc_done_count if tc_done_count else 0
-                eta_ms = avg_ms * remaining
-                yield f"[XOLVIEN_PROGRESS] {tc_done_count}/{total_tc} elapsed_ms={elapsed_ms} eta_ms={eta_ms}\n"
+        try:
+            async for chunk in self._stream_runner_checked(
+                task.container_id, chunk_timeout=90.0,
+            ):
+                now = datetime.utcnow()
+                # Forward the raw chunk verbatim for the left-pane (console.log) view.
+                yield chunk
+                # Reconstruct assistant text from this chunk's text_delta events.
+                for raw_line in chunk.splitlines():
+                    s = raw_line.strip()
+                    if not s:
+                        continue
+                    try:
+                        obj = json.loads(s)
+                    except Exception:
+                        continue
+                    if obj.get("type") == "stream_event":
+                        ev = obj.get("event", {})
+                        if ev.get("type") == "content_block_delta":
+                            delta = ev.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                assistant_text += delta.get("text", "")
+                # Count newly-completed [XOLVIEN_TC_DONE] lines (only whole lines).
+                done_total = assistant_text.count("[XOLVIEN_TC_DONE]")
+                # Subtract a possibly-incomplete trailing marker on the last line.
+                last_line = assistant_text.rsplit("\n", 1)[-1]
+                if "[XOLVIEN_TC_DONE]" in last_line and not assistant_text.endswith("\n"):
+                    done_total -= 1
+                while counted_markers < done_total:
+                    counted_markers += 1
+                    tc_done_count += 1
+                    elapsed_ms = int((now - gen_start).total_seconds() * 1000)
+                    remaining = total_tc - tc_done_count
+                    avg_ms = elapsed_ms // tc_done_count if tc_done_count else 0
+                    eta_ms = avg_ms * remaining
+                    yield f"[XOLVIEN_PROGRESS] {tc_done_count}/{total_tc} elapsed_ms={elapsed_ms} eta_ms={eta_ms}\n"
+        except XolvienError as e:
+            test_run.passed = False
+            test_run.completed_at = datetime.utcnow()
+            test_run.summary = f"Aborted: {e.code.value}"
+            task.status = TaskStatus.IDLE
+            await db.commit()
+            raise
 
         # Marker is mandatory — abort if Claude never output one
         if tc_done_count == 0:
@@ -1833,13 +2050,18 @@ Notes:
                 self._write_text_to_container(task.container_id, "/tmp/xolvien_prompt.txt", fix_prompt)
                 self._write_runner(task.container_id, skip_permissions=True, drop_privs=True)
 
-                async for chunk in self.docker_service.execute_command_stream(
-                    task.container_id,
-                    "python3 /tmp/xolvien_runner.py",
-                    "/workspace/repo",
-                    chunk_timeout=120.0,
-                ):
-                    yield chunk
+                try:
+                    async for chunk in self._stream_runner_checked(
+                        task.container_id, chunk_timeout=120.0,
+                    ):
+                        yield chunk
+                except XolvienError as e:
+                    test_run.passed = False
+                    test_run.completed_at = datetime.utcnow()
+                    test_run.summary = f"Auto-fix aborted: {e.code.value}"
+                    task.status = TaskStatus.IDLE
+                    await db.commit()
+                    raise
 
                 if lang == "en":
                     yield f"\n{tag} Re-running tests...\n"

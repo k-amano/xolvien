@@ -2,6 +2,109 @@
 
 ---
 
+## 2026-07-26
+
+### Fail-loud stream verification — no Claude run can ever end silently
+
+Incident: with a spec file attached, a run ended with a blank right pane and
+no visible error. The container's Claude CLI failed auth (revoked OAuth
+token) and emitted only a synthetic assistant message plus a terminal
+`result` line with `is_error:true` (and, confusingly, `subtype:"success"`) —
+no `text_delta` events at all. Nothing checked the exit status, so the stream
+ended "successfully", no error sentinel was emitted, and the frontend (which
+reconstructs the right pane purely from `text_delta`) rendered nothing.
+
+Design inverted from "an error is something that raises" to **"success must
+be proven"**: a Claude CLI stream only counts as successful if its terminal
+`result` line arrived with `is_error:false`.
+
+- **Backend choke point** `ClaudeCodeService._stream_runner_checked()`: wraps
+  every streamed runner invocation (clarify / generate-prompt / execute /
+  test-code-gen / auto-fix). Passes raw chunks through unmodified while
+  inspecting complete JSON lines; raises `XolvienError` on an error result,
+  on the runner's `_xolvien_error` loop-abort, or when the stream ends with
+  no `result` line at all (CLI crash/startup failure). The raise reaches the
+  client as the existing `[[XOLVIEN_ERROR:CODE]]` sentinel via
+  `_logged_stream()`.
+- `execute_instruction()`'s catch-all no longer swallows: after DB cleanup it
+  re-raises so the sentinel is emitted. `generate_test_cases()`'s quiet
+  "⛔ + return" abort paths now raise (batch exit code checked too).
+- New error codes `CLAUDE_AUTH_FAILED` (revoked/expired CLI credentials) and
+  `CLAUDE_CLI_ERROR` (exited without a result), with JA/EN banner copy.
+- **Frontend second line of defense**: `createStreamJsonRouter()` now also
+  parses `result` lines, the runner abort, and synthetic `assistant`
+  messages (fallback right-pane text when no deltas arrived), exposing
+  `outcome()`. Every clarify/generate onDone handler routes a failed outcome
+  — or an empty final text — to the error banner + an error chat card
+  (`failStreamIfBad()` in TaskDetail) instead of rendering a blank card.
+
+**Verified:** unit-style harness feeding the exact incident stream-json
+(plus split/unterminated-line, loop-abort, no-result and success cases)
+through the real backend generator and the real frontend router — all pass;
+backend py_compile + frontend typecheck/build clean.
+
+### Claude CLI credentials refreshed into the container on every run
+
+Root cause of the auth failure above: the host's
+`~/.claude/.credentials.json` was copied into the container **once at
+container creation**; the host token later rotated and the old access token
+was revoked server-side, so long-lived containers inevitably went stale.
+
+- `DockerService.refresh_claude_credentials()` extracted from the
+  container-creation path and now also called at the start of **every**
+  Claude flow (`_write_runner()` and the test-case batch path), so runs
+  always use the host's freshest credentials. Failure to place the file is
+  not swallowed; a genuinely dead host token now surfaces as the
+  `CLAUDE_AUTH_FAILED` banner instead of a silent blank pane.
+
+**Verified:** tampered the container copy, called the method, confirmed
+byte-identical restore (md5) with owner `xolvien` mode 600; live
+`claude -p` inside the container returned `is_error:false`.
+
+### Per-message reference-file selection + clarify actually reads the spec
+
+Two problems: (1) requirement clarification started even though the CLI could
+not read the uploaded spec at all — clarify runs without tool permissions and
+`/workspace/uploads` is outside its working dir, so Read was denied while the
+prompt simultaneously said "you must read this file"; Claude then interviewed
+the user blind. (2) There was no way to choose WHICH uploaded files a message
+references — every upload was always attached to every flow.
+
+Uploads are expected to be **larger than the context window**, so file
+content is never embedded into prompts; Claude reads the relevant parts via
+its Read tool.
+
+- **Selection UI**: the reference-file chips above the instruction box are
+  now toggleable (✓ solid = referenced by this message, ○ dashed/dimmed =
+  stored but not referenced; × still deletes). Defaults to all-on; the
+  toggle state at send time is what gets sent.
+- **API**: `upload_ids` added to `ClarifyRequest` / `InstructionCreate` and
+  threaded through both frontend stream calls. `_prepare_uploads()` filters
+  to the selection (`None` = all for backward compat, `[]` = none) and now
+  **fails loud** (`UPLOAD_NOT_AVAILABLE`) when a selected id is missing or
+  no file could be placed into the container — previously it silently
+  returned "no uploads".
+- **Clarify read access**: the runner flags file gained `add_dirs`; clarify
+  passes `--add-dir /workspace/uploads`, granting read-only access without
+  enabling write tools.
+- **Proof-of-read marker**: with files selected, the clarify prompt requires
+  reading them first (structure first, then relevant sections) and emitting
+  `[XOLVIEN_SPEC_READ]` as the first line. The backend verifies the marker
+  in the reconstructed assistant text (`text_sink` on
+  `_stream_runner_checked()`) and aborts with `SPEC_NOT_READ` if absent —
+  clarify can no longer proceed without having read the spec. The marker is
+  stripped from all user-visible text. The hard-coded "always ask
+  language/framework first" rule is now conditional on the spec not already
+  answering it, and the prompt forbids asking anything the spec specifies.
+
+**Verified:** E2E against the live task container through the real
+`_write_runner()` → `_stream_runner_checked()` path with the restricted
+clarify flags: the spec's converted Markdown was read (`## Sheet: Overview`
+returned) with the marker present; error-path regression suite re-passed;
+typecheck + production build clean.
+
+---
+
 ## 2026-07-09
 
 ### File attach UI moved into the instruction toolbar (GitHub-Issue-style)

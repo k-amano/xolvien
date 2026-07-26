@@ -190,6 +190,8 @@ export const en = {
   uploadFailed: 'Upload failed',
   uploadDeleteFailed: 'Failed to delete file',
   repoAttachments: 'Reference files',
+  uploadRefOn: 'Referenced by this message (click to exclude)',
+  uploadRefOff: 'Not referenced (click to include)',
   generatePromptDirect: 'Generate Prompt',
   confirmRequirements: 'Confirm Requirements',
   emptyState: 'Enter instructions to get started',

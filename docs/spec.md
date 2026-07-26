@@ -292,7 +292,11 @@ Uploads are scoped to the **Repository (project)**, not to a single task. A proj
 
 ### 5.1 How files reach Claude
 
-This project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. On each Claude run (`clarify_requirements()` / `execute_instruction()`), `DockerService.copy_uploads_to_container()` copies the repository's uploads from the host volume into `/workspace/uploads/`, and `ClaudeCodeService._prepare_uploads()` injects an "Uploaded Reference Files" section into the prompt listing the paths. Claude reads the files with its `Read` tool.
+This project drives Claude via the **Claude Code CLI inside the task container**, not the Claude API. On each Claude run (`clarify_requirements()` / `execute_instruction()`), `DockerService.copy_uploads_to_container()` copies the **selected** uploads from the host volume into `/workspace/uploads/`, and `ClaudeCodeService._prepare_uploads()` injects an "Uploaded Reference Files" section into the prompt listing the paths. Claude reads the files with its `Read` tool. File content is **never embedded into prompts** — uploads are expected to be larger than the context window; Claude reads the relevant parts on demand.
+
+Which uploads a message references is chosen per message (2026-07-26): the frontend sends `upload_ids` with clarify and execute requests (`None` = all uploads for backward compatibility, `[]` = none). A selected id that cannot be found or placed into the container raises `UPLOAD_NOT_AVAILABLE` — a run never quietly proceeds without its reference files.
+
+The clarify flow runs without write-tool permissions, and `/workspace/uploads` is outside its working dir (`/workspace/repo`), so it is granted **read-only** access via `--add-dir /workspace/uploads` (runner flags `add_dirs`). With files selected, the clarify prompt requires reading them first and emitting a `[XOLVIEN_SPEC_READ]` marker as the first response line; the backend verifies the marker in the reconstructed assistant text and aborts with `SPEC_NOT_READ` if absent, so clarification can never interview the user without having read the spec. The marker is stripped from user-visible text.
 
 Claude Code's `Read` tool rejects binary files, so binary documents are **converted to Markdown server-side** at upload time (`services/document_converter.py`, using `openpyxl`/`python-docx`/`pdfplumber`). The conversion is written as a sibling file `{stored_path}.md` on the host volume, copied into the container together with the original, and the prompt listing points Claude at the `.md` path (with an instruction not to read the binary). Conversion is also retried lazily on each Claude run (`_prepare_uploads()`), covering uploads that predate this feature or whose conversion failed; a failed conversion never rejects the upload itself.
 
@@ -319,6 +323,7 @@ Claude Code's `Read` tool rejects binary files, so binary documents are **conver
 - **TaskDetail**: `AttachFilesButton` is the last icon in the Markdown toolbar above the instruction textarea (after a divider); `AttachedFilesChips` renders immediately above the textarea, labeled "Reference files".
 - **TaskCreate**: unchanged placement (a labeled row below the repository dropdown, shown only once an existing repository is selected) — there is no per-message toolbar on this screen since no instruction is being composed yet, so the button and chips render together as before, just via the new shared hook.
 - Attached filenames appear as chips; each chip has a remove (×) button.
+- **Per-message selection (2026-07-26):** each chip is a toggle — ✓ with a solid border means "referenced by the next message", ○ with a dashed/dimmed style means "stored but not referenced". Defaults to all-on (new uploads included); the toggle state at send time is sent as `upload_ids` with clarify and execute requests. × deletes the file from the repository regardless of toggle state.
 - Files are uploaded immediately on selection.
 - The instruction textarea is not auto-populated — files are attached silently.
 
@@ -580,8 +585,9 @@ Repository uploads are NOT under backend/; they live on the persistent
 
 | Method | Description |
 |---|---|
-| `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. (Activity-log file writing happens at the API layer — see §7.3.) |
-| `clarify_requirements()` | Requirement clarification Q&A. Asks one question at a time, each with a bulleted `Options:` / `選択肢:` block. Continues until the user clicks "Skip to generate prompt". |
+| `_stream_runner_checked()` | Single choke point for every streamed Claude CLI run (2026-07-26). Streams raw chunks through unmodified while verifying the terminal `result` line: an `is_error:true` result, the runner's `_xolvien_error` loop-abort, or a stream ending with **no** result line all raise `XolvienError` (→ `[[XOLVIEN_ERROR:CODE]]` sentinel → error banner). Success must be proven; a run can never end silently. Optional `text_sink` collects `text_delta` fragments for callers that verify response content (clarify's proof-of-read marker). |
+| `execute_instruction()` | Executes an arbitrary instruction via Claude Agent. Yields log lines as an AsyncGenerator. On failure, re-raises after DB cleanup so the error sentinel reaches the client. (Activity-log file writing happens at the API layer — see §7.3.) |
+| `clarify_requirements()` | Requirement clarification Q&A. Asks one question at a time, each with a bulleted `Options:` / `選択肢:` block. Continues until the user clicks "Skip to generate prompt". With reference files selected, gets read-only upload access (`--add-dir`) and must emit `[XOLVIEN_SPEC_READ]` proving it read them (else `SPEC_NOT_READ`) — see §5.1. |
 | `generate_prompt()` | Converts a brief instruction into an optimized prompt. |
 | `generate_test_cases()` | Generates UNIT (`TC-NNN`), INTEGRATION (`ITC-NNN`), or E2E (`E2E-NNN`) test cases based on `test_type`. Uses batch generation via `--output-format json` + `--resume` (10 cases per call). Yields `[XOLVIEN_PROGRESS] done/total elapsed_ms=N eta_ms=0` after each batch. |
 | `run_unit_tests()` | Wrapper passing `TestType.UNIT` to `_run_tests()`. |
@@ -616,7 +622,7 @@ There is no standalone UploadService; the logic spans the repository API and the
 - Contents: Python 3.11-slim + Git + Node.js 20 + Claude Code CLI
 - Per-task volume: `xolvien-task-{task_id}-data` (mounted at `/workspace`)
 - SSH keys: host `~/.ssh/` mounted into the container (for GitHub auth)
-- Claude credentials: only `~/.claude/.credentials.json` copied into `/home/xolvien/.claude/`
+- Claude credentials: only `~/.claude/.credentials.json` copied into `/home/xolvien/.claude/` — and **re-copied at the start of every Claude flow** (`DockerService.refresh_claude_credentials()`, 2026-07-26), because host OAuth tokens rotate and the creation-time snapshot goes stale in long-lived containers (401 "token has been revoked"). A genuinely dead host token surfaces as the `CLAUDE_AUTH_FAILED` banner.
 
 ### 9.6 Test Execution Details
 

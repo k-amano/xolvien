@@ -20,7 +20,40 @@ export type StreamErrorCb = (code: ErrorCode, detail: string) => void
  */
 export function createStreamJsonRouter() {
   let lineCarry = ''
-  let assistantText = ''
+  let deltaText = ''
+  // Fallback: text blocks on full `assistant` messages. On error runs (e.g. a
+  // revoked OAuth token) the CLI emits NO text_delta events at all — only a
+  // synthetic assistant message plus a `result` line with is_error:true — so
+  // without this the right pane would end up blank.
+  let messageText = ''
+  let sawResult = false
+  let resultIsError = false
+  let resultText = ''
+  let runnerError = ''
+
+  const inspect = (o: Record<string, unknown>) => {
+    if (o.type === 'stream_event') {
+      const ev = (o.event ?? {}) as Record<string, unknown>
+      if (ev.type === 'content_block_delta') {
+        const delta = (ev.delta ?? {}) as Record<string, unknown>
+        if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+          deltaText += delta.text
+        }
+      }
+    } else if (o.type === 'assistant') {
+      const msg = (o.message ?? {}) as Record<string, unknown>
+      const content = Array.isArray(msg.content) ? (msg.content as Record<string, unknown>[]) : []
+      for (const block of content) {
+        if (block.type === 'text' && typeof block.text === 'string') messageText += block.text
+      }
+    } else if (o.type === 'result') {
+      sawResult = true
+      resultIsError = Boolean(o.is_error)
+      if (typeof o.result === 'string') resultText = o.result
+    } else if (o.type === '_xolvien_error') {
+      runnerError = typeof o.message === 'string' ? o.message : 'runner aborted'
+    }
+  }
 
   return {
     /** Feed one raw chunk. Returns the verbatim raw text (for the left pane). */
@@ -33,21 +66,34 @@ export function createStreamJsonRouter() {
         if (!s) continue
         let obj: unknown
         try { obj = JSON.parse(s) } catch { continue }
-        const o = obj as Record<string, unknown>
-        if (o.type === 'stream_event') {
-          const ev = (o.event ?? {}) as Record<string, unknown>
-          if (ev.type === 'content_block_delta') {
-            const delta = (ev.delta ?? {}) as Record<string, unknown>
-            if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-              assistantText += delta.text
-            }
-          }
-        }
+        inspect(obj as Record<string, unknown>)
       }
       return { raw: rawChunk }
     },
     /** The reconstructed assistant text so far (for the right pane). */
-    text(): string { return assistantText },
+    text(): string { return deltaText || messageText },
+    /**
+     * Terminal verdict — success must be PROVEN by a `result` line with
+     * is_error:false. Callers must check this in their onDone handler and
+     * route failures to the error banner instead of rendering a blank card.
+     * (The backend also raises a sentinel for these cases; this is the
+     * client-side line of defense so no failure can ever end silently.)
+     */
+    outcome(): { ok: boolean; code: ErrorCode; detail: string } {
+      if (runnerError) {
+        const code = classifyError(200, runnerError)
+        return { ok: false, code: code === 'UNKNOWN' ? 'CLAUDE_CLI_ERROR' : code, detail: runnerError }
+      }
+      if (sawResult && resultIsError) {
+        const detail = resultText || 'Claude CLI reported an error result'
+        const code = classifyError(200, detail)
+        return { ok: false, code: code === 'UNKNOWN' ? 'CLAUDE_API_ERROR' : code, detail }
+      }
+      if (!sawResult) {
+        return { ok: false, code: 'CLAUDE_CLI_ERROR', detail: 'Stream ended without a result line from the Claude CLI' }
+      }
+      return { ok: true, code: 'UNKNOWN', detail: '' }
+    },
   }
 }
 
@@ -282,6 +328,7 @@ export async function clarifyStream(
   taskId: number,
   instruction: string,
   history: { role: 'assistant' | 'user'; content: string }[],
+  uploadIds: number[],
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: StreamErrorCb,
@@ -296,7 +343,7 @@ export async function clarifyStream(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${AUTH_TOKEN}`,
         },
-        body: JSON.stringify({ instruction, history, lang }),
+        body: JSON.stringify({ instruction, history, lang, upload_ids: uploadIds }),
       }
     )
 
@@ -507,6 +554,7 @@ export async function runE2ETestsStream(
 export async function executeInstructionStream(
   taskId: number,
   content: string,
+  uploadIds: number[],
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: StreamErrorCb
@@ -520,7 +568,7 @@ export async function executeInstructionStream(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${AUTH_TOKEN}`,
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, upload_ids: uploadIds }),
       }
     )
 
