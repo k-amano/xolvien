@@ -105,7 +105,8 @@ async def execute_instruction_stream(
         task_id,
         "execute",
         claude_service.execute_instruction(
-            db, task_id, instruction_data.content, instruction_data.upload_ids
+            db, task_id, instruction_data.content, instruction_data.upload_ids,
+            lang=instruction_data.lang,
         ),
     )
 

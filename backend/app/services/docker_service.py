@@ -181,6 +181,7 @@ class DockerService:
         container_id: str,
         command: str,
         workdir: str = "/workspace/repo",
+        user: Optional[str] = None,
     ) -> Tuple[int, str, str]:
         """
         Execute a command in the container.
@@ -189,6 +190,9 @@ class DockerService:
             container_id: Container ID
             command: Command to execute
             workdir: Working directory
+            user: Container user to run as (None = container default/root).
+                  HOME is set to match, so user-site installs (pip --user,
+                  npm cache, ~/.cache browsers) resolve for that user.
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
@@ -196,9 +200,16 @@ class DockerService:
         try:
             self.ensure_container_running(container_id)
             container = self.client.containers.get(container_id)
+            kwargs = {}
+            if user:
+                kwargs["user"] = user
+                kwargs["environment"] = {
+                    "HOME": "/root" if user == "root" else f"/home/{user}"
+                }
             exit_code, output = container.exec_run(
                 ["bash", "-c", command],
                 workdir=workdir,
+                **kwargs,
             )
             return exit_code, output.decode("utf-8", errors="replace"), ""
         except NotFound:

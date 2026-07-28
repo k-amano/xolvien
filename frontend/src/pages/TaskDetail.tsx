@@ -958,7 +958,8 @@ export default function TaskDetail() {
           const realIdx = prev.length - 1 - idx
           return prev.map((e, i) => i === realIdx ? { type: 'error', code } : e)
         })
-      }
+      },
+      lang
     )
   }
 

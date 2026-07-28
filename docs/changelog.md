@@ -2,6 +2,66 @@
 
 ---
 
+## 2026-07-28
+
+### Single container-side user for everything that touches the repo
+
+Incident: after a successful implement, unit tests failed every case with
+"[TEST] No test framework found" (twice, deterministically). Root cause was a
+**user mismatch**: Claude agent mode runs as the `xolvien` user (drop_privs)
+and had installed the test dependencies with `pip install --user` — landing
+in `/home/xolvien/.local` — while test-framework detection and test execution
+ran as **root**, which cannot see xolvien's user-site packages. The
+environment was fine; detection was simply looking as the wrong user. App
+users cannot influence container-side users, so this class of mismatch must
+be structurally impossible.
+
+- `DockerService.execute_command()` gained a `user` parameter (exec as that
+  user with matching `HOME`, so pip user-site / npm cache / `~/.cache`
+  resolve correctly).
+- New module constant `AGENT_USER = "xolvien"`: framework detection (unit +
+  E2E), test execution, and both app-side git commits now run as the agent
+  user — the same identity that installs dependencies and writes code, so
+  detection can never again disagree with execution. Commits carry an inline
+  git identity (`-c user.name/user.email`) since root's git config does not
+  apply to xolvien's HOME.
+- `_normalize_repo_ownership()`: at the start of every Claude flow, chown any
+  file under `/workspace/repo` not owned by the agent user (touches only
+  mismatched files — cheap when clean). Heals tasks created before this fix
+  and removes the latent bug where root-created `.git` objects broke
+  subsequent xolvien git operations (a likely cause of past
+  CLAUDE_PERMISSION_LOOP incidents). The test report file (written by root's
+  base64 helper) is chowned to the agent user immediately after writing.
+- Fail-loud: "No test framework found" now raises `TEST_INFRA_ERROR` (error
+  banner) instead of quietly ending the stream after an in-pane message.
+
+**Verified against the real task container:** detection via the real service
+path returned `python -m pytest -v`; running it as the agent user executed
+the previously "missing" suite — **50/50 passed** (the generated tests had
+been fine all along); git commit as xolvien carried the correct author;
+stream-verdict regression suite (6 cases) still green.
+
+### Generated documents follow the UI language
+
+Running in English mode still produced Japanese documents. The implement flow
+(`execute_instruction`) was the only flow that did not receive `lang` from
+the request — its three `schedule_generation()` calls (requirements at start;
+external/internal design at completion) hard-coded `"ja"`, while
+`DocumentService` itself already switches prompts/headings by `lang`.
+
+- `InstructionCreate` gained `lang` (default `"ja"`, backward compatible);
+  `/execute-stream` forwards it; `execute_instruction()` uses it for both
+  `schedule_generation()` calls and the uploads listing; the frontend sends
+  the current UI language with `executeInstructionStream`.
+- E2E-completion documents (specification / test report) already received
+  `lang` — unchanged.
+
+**Verified:** backend py_compile + frontend typecheck/build clean. Existing
+Japanese YAMLs are kept; the next implement run in English mode generates
+English documents.
+
+---
+
 ## 2026-07-26
 
 ### Fail-loud stream verification — no Claude run can ever end silently

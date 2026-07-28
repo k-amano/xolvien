@@ -66,6 +66,8 @@ class InstructionCreate(InstructionBase):
 
     # See ClarifyRequest.upload_ids — same semantics for execution.
     upload_ids: Optional[List[int]] = None
+    # UI language — also the language the generated documents are written in.
+    lang: str = "ja"
 
 
 class InstructionResponse(InstructionBase):

@@ -557,7 +557,8 @@ export async function executeInstructionStream(
   uploadIds: number[],
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: StreamErrorCb
+  onError: StreamErrorCb,
+  lang: string = 'ja'
 ): Promise<void> {
   try {
     const response = await fetch(
@@ -568,7 +569,8 @@ export async function executeInstructionStream(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${AUTH_TOKEN}`,
         },
-        body: JSON.stringify({ content, upload_ids: uploadIds }),
+        // lang controls the language of the auto-generated documents
+        body: JSON.stringify({ content, upload_ids: uploadIds, lang }),
       }
     )
 

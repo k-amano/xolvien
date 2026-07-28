@@ -345,6 +345,8 @@ Documents are generated automatically at each phase transition. They are stored 
 | Specification | E2E test run complete (= all tests complete, step 18) | Implementation prompt + all test case items |
 | Test report | E2E test run complete (= all tests complete, step 18) | Latest test run per type + per-case results (UT / IT / E2E) |
 
+Documents are written in the **UI language at the time of the triggering run** (2026-07-28): every flow forwards `lang` to `schedule_generation()` — including the implement flow, which previously hard-coded Japanese (`InstructionCreate.lang` → `/execute-stream` → `execute_instruction()`).
+
 Generation runs as **fire-and-forget background tasks** (`asyncio.create_task`) scheduled from the user flows, so the streamed response the user is watching is never delayed. The docgen Claude run uses its own `/tmp` file names inside the container (`xolvien_docgen_*`), so it cannot clobber a concurrent user-facing run; the two share container CPU (accepted v1 limitation). A generation failure is logged and never surfaces into the user flow.
 
 ### 6.2 Document Content Definitions
@@ -594,7 +596,7 @@ Repository uploads are NOT under backend/; they live on the persistent
 | `run_integration_tests()` | Wrapper passing `TestType.INTEGRATION` to `_run_tests()`. |
 | `run_e2e_tests()` | Wrapper passing `TestType.E2E` to `_run_tests()`. |
 | `_run_tests()` | Shared implementation: generate test code → run → auto-fix loop (up to 3 attempts). Aborts immediately on infrastructure errors (EACCES etc.). |
-| `_detect_test_command()` | Checks `package.json` first, then `pyproject.toml` / `setup.py`. Does not infer Python from `requirements.txt` alone. |
+| `_detect_test_command()` | Checks `package.json` first, then `pyproject.toml` / `setup.py` / `requirements*.txt`. All checks (including the pytest-installed probe) run as `AGENT_USER` so detection sees exactly what test execution sees — see §9.6. |
 | `_extract_result_for_function()` | Handles Jest (`--verbose` `✓/✕ TC-xxx:`) and pytest verbose (`PASSED/FAILED`) output to determine verdict. |
 
 ### 9.3 DocumentService
@@ -626,6 +628,7 @@ There is no standalone UploadService; the logic spans the repository API and the
 
 ### 9.6 Test Execution Details
 
+- **Single container-side user (2026-07-28):** framework detection, test execution, and app-side git commits all run as `AGENT_USER` (`xolvien`) — the same user Claude agent mode runs as and installs dependencies as (`pip install --user` lands in `/home/xolvien/.local`, invisible to root; a root-side check once produced "No test framework found" against a perfectly runnable suite). `DockerService.execute_command()` takes a `user` parameter (sets matching `HOME`). `_normalize_repo_ownership()` chowns any non-agent-owned repo files at the start of every flow, healing older tasks and preventing root-created `.git` objects from breaking later agent-side git operations. An undetectable test framework raises `TEST_INFRA_ERROR` (error banner) instead of ending quietly.
 - Node.js projects: `npm test -- --watchAll=false --verbose 2>&1`; Python: `python -m pytest -v 2>&1`
 - Before test execution, the backend pre-creates JSONL result files with `chmod 777`: `/tmp/xolvien_tc_results.jsonl` (unit), `/tmp/xolvien_itc_results.jsonl` (integration), `/tmp/xolvien_e2e_results.jsonl` (E2E)
 - Test code logs actual output via `console.log('XOLVIEN_RESULT:{"tc_id":"TC-001","actual":"..."}')` for both PASSED and FAILED

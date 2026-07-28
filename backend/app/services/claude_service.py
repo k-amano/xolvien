@@ -19,6 +19,17 @@ from app.services import document_converter
 from app.services.document_service import schedule_generation
 from app.errors import ErrorCode, XolvienError, classify_text
 
+# Single container-side identity for everything that touches /workspace/repo
+# or runs project tooling (tests, npm, pip, git). Claude agent mode already
+# runs as this user (drop_privs), so detection/execution MUST use it too:
+# running them as root once caused "No test framework found" because pytest
+# was pip-install --user'd into /home/xolvien/.local, invisible to root.
+AGENT_USER = "xolvien"
+
+# Git identity applied inline on app-side commits (git config of the root
+# entrypoint does not apply to the xolvien user's HOME).
+_GIT_ID = "-c user.name='Xolvien Bot' -c user.email='bot@xolvien.com'"
+
 # Unified RAW stream-json runner for ALL streamed Claude flows (clarify, prompt
 # generation, test code-gen, test auto-fix, execute).
 #
@@ -272,6 +283,19 @@ class ClaudeCodeService:
         )
         self.docker_service.execute_command(container_id, cmd, "/workspace")
 
+    def _normalize_repo_ownership(self, container_id: str) -> None:
+        """
+        chown any file under /workspace/repo not owned by AGENT_USER (runs as
+        root; touches only mismatched files, so it is cheap when there is
+        nothing to fix). Keeps the whole repo usable by the single agent user.
+        """
+        self.docker_service.execute_command(
+            container_id,
+            f"find /workspace/repo \\! -user {AGENT_USER} "
+            f"-exec chown {AGENT_USER}:{AGENT_USER} {{}} + 2>/dev/null || true",
+            "/workspace",
+        )
+
     def _write_runner(
         self,
         container_id: str,
@@ -293,6 +317,10 @@ class ClaudeCodeService:
         # tokens rotate, and the snapshot taken at container creation goes
         # stale in long-lived containers (401 "token has been revoked").
         self.docker_service.refresh_claude_credentials(container_id)
+        # Heal any root-owned files inside the repo (from older app versions
+        # or stray root operations) so every AGENT_USER operation — Claude
+        # itself, tests, git — never hits a permission mismatch.
+        self._normalize_repo_ownership(container_id)
         self._write_text_to_container(
             container_id, "/tmp/xolvien_runner_flags.json",
             json.dumps({
@@ -875,6 +903,7 @@ README:
         task_id: int,
         instruction_content: str,
         upload_ids: list[int] | None = None,
+        lang: str = "ja",
     ) -> AsyncGenerator[str, None]:
         """
         Execute instruction via Claude Code CLI agent mode inside the task container.
@@ -926,12 +955,12 @@ README:
             # generate the requirements definition document in the background.
             schedule_generation(
                 task_id, task.container_id,
-                [("requirements", instruction_content)], "ja",
+                [("requirements", instruction_content)], lang,
             )
 
             # Copy the SELECTED repository uploads into the container and prepend
             # a reference to them so Claude reads them during execution.
-            uploads_section = await self._prepare_uploads(db, task, "ja", upload_ids)
+            uploads_section = await self._prepare_uploads(db, task, lang, upload_ids)
             prompt_text = instruction_content
             if uploads_section:
                 yield "[SYSTEM] Attached reference files made available at /workspace/uploads/\n\n"
@@ -968,10 +997,10 @@ README:
             commit_cmd = (
                 "git add -A && "
                 "git diff --cached --quiet && echo '[GIT] No changes (skipping commit)' || "
-                "git commit -F /tmp/xolvien_commit_msg.txt"
+                f"git {_GIT_ID} commit -F /tmp/xolvien_commit_msg.txt"
             )
             _, commit_out, _ = self.docker_service.execute_command(
-                task.container_id, commit_cmd, "/workspace/repo"
+                task.container_id, commit_cmd, "/workspace/repo", user=AGENT_USER
             )
             if commit_out.strip():
                 yield f"{commit_out.strip()}\n"
@@ -999,7 +1028,7 @@ README:
                     ("external_design", instruction_content),
                     ("internal_design", instruction_content),
                 ],
-                "ja",
+                lang,
             )
 
             yield "\n[SYSTEM] Done\n"
@@ -1208,8 +1237,10 @@ README:
         self.docker_service.execute_command(
             task.container_id, "rm -f /tmp/xolvien_session.txt", "/workspace"
         )
-        # This flow bypasses _write_runner, so refresh credentials here too.
+        # This flow bypasses _write_runner, so refresh credentials and
+        # normalize repo ownership here too.
         self.docker_service.refresh_claude_credentials(task.container_id)
+        self._normalize_repo_ownership(task.container_id)
         self._write_text_to_container(
             task.container_id, "/tmp/xolvien_runner_tc.py", _RUNNER_SCRIPT_TC_BATCH
         )
@@ -1340,11 +1371,17 @@ README:
         return items
 
     def _detect_e2e_test_command(self, container_id: str) -> str | None:
-        """Detect Playwright config and return the appropriate E2E test command."""
+        """Detect Playwright config and return the appropriate E2E test command.
+
+        All checks run as AGENT_USER — the same user that installed the
+        dependencies and will run the tests — so detection can never disagree
+        with execution about what is installed.
+        """
         _, config_check, _ = self.docker_service.execute_command(
             container_id,
             "ls /workspace/repo/playwright.config.js /workspace/repo/playwright.config.ts 2>/dev/null | head -1 || echo ''",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         if config_check.strip():
             return "npx playwright test --reporter=list 2>&1"
@@ -1354,6 +1391,7 @@ README:
             container_id,
             "python -c 'import playwright' 2>/dev/null && echo 'ok' || echo ''",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         if py_playwright.strip() == "ok":
             return "python -m pytest tests/e2e/ -v 2>&1"
@@ -1366,12 +1404,19 @@ README:
         Detect the test command from the project structure.
         Returns the command string, or None if no test framework is found.
         package.json is checked first — Node.js projects may also have requirements.txt.
+
+        All checks run as AGENT_USER: Claude installs dependencies as that
+        user (pip install --user lands in /home/xolvien/.local), so a
+        root-side check would report pytest "missing" even though the tests
+        are perfectly runnable — the exact "No test framework found" failure
+        this used to produce.
         """
         # Check Node.js first (package.json is unambiguous)
         _, pkg_json, _ = self.docker_service.execute_command(
             container_id,
             "cat /workspace/repo/package.json 2>/dev/null || echo ''",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         if pkg_json.strip():
             return "npm test -- --watchAll=false --verbose 2>&1"
@@ -1381,16 +1426,19 @@ README:
             container_id,
             "cat /workspace/repo/pyproject.toml 2>/dev/null || echo ''",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         _, setup_py, _ = self.docker_service.execute_command(
             container_id,
             "test -f /workspace/repo/setup.py && echo 'exists' || echo ''",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         _, req_files, _ = self.docker_service.execute_command(
             container_id,
             "ls /workspace/repo/requirements*.txt 2>/dev/null || echo ''",
             "/workspace/repo",
+            user=AGENT_USER,
         )
 
         is_python = (
@@ -1401,11 +1449,12 @@ README:
         )
 
         if is_python:
-            # Verify pytest is actually installed
+            # Verify pytest is actually installed FOR THE AGENT USER
             _, pytest_check, _ = self.docker_service.execute_command(
                 container_id,
                 "python -m pytest --version 2>/dev/null && echo 'ok' || echo 'missing'",
                 "/workspace/repo",
+                user=AGENT_USER,
             )
             if 'missing' in pytest_check:
                 return None  # pytest not installed — caller should install first
@@ -1951,7 +2000,12 @@ Notes:
             await db.commit()
             task.status = TaskStatus.IDLE
             await db.commit()
-            return
+            # Fail loud: an undetectable test framework is an infrastructure
+            # problem, not a quiet no-op — raise so the error banner shows.
+            raise XolvienError(
+                ErrorCode.TEST_INFRA_ERROR,
+                "no test framework detected (checked as the agent user)",
+            )
 
         test_run.test_command = test_command
         await db.commit()
@@ -2072,6 +2126,7 @@ Notes:
                 task.container_id,
                 test_command,
                 "/workspace/repo",
+                user=AGENT_USER,
             )
             last_output = output
             last_error = error
@@ -2279,8 +2334,16 @@ Notes:
             task.container_id,
             "mkdir -p /workspace/repo/test-reports",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         self._write_text_to_container(task.container_id, report_path, report_content)
+        # The report was written by root (base64 helper) inside the
+        # xolvien-owned repo — hand it to the agent user immediately.
+        self.docker_service.execute_command(
+            task.container_id,
+            f"chown {AGENT_USER}:{AGENT_USER} {report_path}",
+            "/workspace/repo",
+        )
 
         test_run.report_path = report_path
         test_run.completed_at = datetime.utcnow()
@@ -2291,8 +2354,9 @@ Notes:
         no_changes_msg = "[GIT] No changes" if lang == "en" else "[GIT] 変更なし"
         _, commit_out, _ = self.docker_service.execute_command(
             task.container_id,
-            f"git add -A && git diff --cached --quiet && echo '{no_changes_msg}' || git commit -F /tmp/xolvien_commit_msg.txt",
+            f"git add -A && git diff --cached --quiet && echo '{no_changes_msg}' || git {_GIT_ID} commit -F /tmp/xolvien_commit_msg.txt",
             "/workspace/repo",
+            user=AGENT_USER,
         )
         if commit_out.strip():
             yield f"[GIT] {commit_out.strip()}\n"
