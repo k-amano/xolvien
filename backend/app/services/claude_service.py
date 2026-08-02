@@ -538,16 +538,33 @@ class ClaudeCodeService:
             f"{listing}\n"
         )
 
-    def reset_workspace(self, container_id: str) -> None:
-        """Delete all files under /workspace/repo and reinitialise a bare git repo."""
+    def reset_workspace(
+        self,
+        container_id: str,
+        repository_url: str | None = None,
+        branch_name: str | None = None,
+    ) -> None:
+        """
+        Delete all files under /workspace/repo and reinitialise a git repo.
+
+        repository_url / branch_name restore the origin remote and the task
+        branch — without them the rebuilt repo has NO remote and sits on the
+        default `main` branch, so a later Git Push fails with "'origin' does
+        not appear to be a git repository" (which pattern-classification then
+        misreported as an auth failure).
+        """
         cmd = (
             "rm -rf /workspace/repo && "
             "mkdir -p /workspace/repo && "
             "chown xolvien:xolvien /workspace/repo && "
             "git init /workspace/repo && "
-            "git -C /workspace/repo commit --allow-empty -m 'initial' && "
-            "chown -R xolvien:xolvien /workspace/repo"
+            f"git -C /workspace/repo {_GIT_ID} commit --allow-empty -m 'initial' && "
         )
+        if branch_name:
+            cmd += f"git -C /workspace/repo branch -M {branch_name} && "
+        if repository_url:
+            cmd += f"git -C /workspace/repo remote add origin {repository_url} && "
+        cmd += "chown -R xolvien:xolvien /workspace/repo"
         exit_code, _, stderr = self.docker_service.execute_command(container_id, cmd, "/workspace")
         if exit_code != 0:
             raise RuntimeError(f"reset_workspace failed: {stderr}")

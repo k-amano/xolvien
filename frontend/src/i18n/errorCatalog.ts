@@ -57,8 +57,8 @@ const ja: Record<ErrorCode, ErrorCopy> = {
   },
   GIT_PUSH_REJECTED: {
     title: '変更を反映できませんでした',
-    cause: 'リモートに別の変更があるため、push が拒否されました。',
-    actions: ['リモートの変更を取り込んでから、もう一度 push してください'],
+    cause: 'push が拒否され、自動解決（リモートの取り込み → 再push → 必要に応じた上書きpush）も失敗しました。',
+    actions: ['左ペインのログで失敗した手順を確認してください', 'GitHub側でブランチ保護が設定されていないか確認してください'],
   },
   TEST_INFRA_ERROR: {
     title: 'テストを実行できませんでした',
@@ -125,8 +125,8 @@ const en: Record<ErrorCode, ErrorCopy> = {
   },
   GIT_PUSH_REJECTED: {
     title: 'Could not apply your changes',
-    cause: 'The remote has other changes, so the push was rejected.',
-    actions: ['Pull the remote changes, then push again'],
+    cause: 'The push was rejected and automatic resolution (pull remote changes → re-push → overwrite-push if needed) also failed.',
+    actions: ['Check the left log pane for the step that failed', 'Check whether branch protection is enabled on GitHub'],
   },
   TEST_INFRA_ERROR: {
     title: 'Could not run the tests',

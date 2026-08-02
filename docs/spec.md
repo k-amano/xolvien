@@ -505,7 +505,15 @@ The button set below the input area switches based on `selectedStep`:
 When a prior completed instruction exists, the implement step shows two buttons:
 
 - **Modify**: Starts the clarify → prompt generation → execute flow with the existing `/workspace/repo` intact. Claude makes targeted changes to existing code.
-- **Reset & Rebuild**: Calls `POST /reset-workspace` to delete all files under `/workspace/repo` and reinitialise a bare git repo, then starts the clarify flow from scratch.
+- **Reset & Rebuild**: Calls `POST /reset-workspace` to delete all files under `/workspace/repo` and reinitialise a bare git repo, then starts the clarify flow from scratch. The rebuilt repo keeps its **origin remote and task branch** (restored from the DB, 2026-08-02) — without this, a later Git Push failed with a missing-remote error that was misclassified as an auth failure.
+
+**Git Push (step 20) — self-repairing and self-resolving (2026-08-02).** `POST /git/push` requires no manual git from the user:
+
+1. *Repair*: a missing origin remote is re-added from the repository URL; a missing task branch is created by renaming the current branch (heals repos rebuilt by the pre-fix reset).
+2. *Push*; on non-fast-forward rejection: fetch → rebase onto `origin/{branch}` → re-push.
+3. If the rebase cannot apply (divergent history — the normal aftermath of Reset & Rebuild): abort and `push --force-with-lease`. Safe because the lease was fetched moments earlier and the branch is dedicated to this task.
+
+Every step's exit code is checked; any failure emits the error sentinel (the `GIT_PUSH_REJECTED` banner then means "auto-resolution also failed" — check the log / GitHub branch protection). The frontend no longer text-scans the accumulated stream for git errors: a successfully auto-resolved push legitimately contains the first attempt's `[rejected]` line, so the sentinel is authoritative. Root-side fetch/rebase is followed by repo-ownership normalization back to the agent user (§9.6).
 
 ### 8.3 Step Bar
 

@@ -7,6 +7,7 @@ from typing import List
 
 from app.database import get_db
 from app.models.task import Task
+from app.models.repository import Repository
 from app.models.instruction import Instruction, InstructionStatus
 from app.models.test_run import TestType
 from app.schemas.instruction import InstructionCreate, InstructionResponse, GeneratePromptRequest, ClarifyRequest, GenerateTestCasesRequest, RunUnitTestsRequest, RunIntegrationTestsRequest, RunE2ETestsRequest
@@ -128,9 +129,20 @@ async def reset_workspace(
     if not task.container_id:
         raise HTTPException(status_code=400, detail="Task has no container")
 
+    # Repository URL + task branch are restored into the rebuilt repo so a
+    # later Git Push still has its origin remote and branch.
+    repo_result = await db.execute(
+        select(Repository).where(Repository.id == task.repository_id)
+    )
+    repository = repo_result.scalar_one_or_none()
+
     claude_service = get_claude_service()
     try:
-        claude_service.reset_workspace(task.container_id)
+        claude_service.reset_workspace(
+            task.container_id,
+            repository_url=repository.url if repository else None,
+            branch_name=task.branch_name,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

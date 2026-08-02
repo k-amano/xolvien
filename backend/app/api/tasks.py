@@ -15,7 +15,9 @@ from app.api.auth import verify_token
 from app.api.repositories import get_or_create_default_user
 from app.services.activity_log import ActivityLog
 from app.services.docker_service import get_docker_service
-from app.errors import XolvienError, classify_exception, error_sentinel_line
+from app.errors import (
+    ErrorCode, XolvienError, classify_exception, classify_text, error_sentinel_line,
+)
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
@@ -258,32 +260,137 @@ async def git_push(
     if not task.container_id:
         raise HTTPException(status_code=400, detail="Task has no container")
 
+    repo_result = await db.execute(
+        select(Repository).where(Repository.id == task.repository_id)
+    )
+    repository = repo_result.scalar_one_or_none()
+
     docker_service = get_docker_service()
 
     async def stream():
+        """
+        Push with automatic repair and conflict resolution.
+
+        Repair (repos rebuilt by an older Reset & Rebuild lack both):
+          - missing `origin` remote -> re-added from the repository URL
+          - missing task branch -> the current branch is renamed to it
+
+        Conflict resolution: the task branch is dedicated
+        to this task, so a rejected push is auto-resolved without user action:
+
+          1. push
+          2. rejected? -> fetch + rebase onto origin/{branch}, push again
+          3. rebase impossible (divergent history — the normal aftermath of
+             Reset & Rebuild, which reinitialises the repo)? -> abort rebase
+             and push --force-with-lease (safe: the lease was just fetched,
+             and only this task writes to its branch)
+
+        Every failing step emits the [[XOLVIEN_ERROR:CODE]] sentinel — the
+        stream never ends in an unresolved state without a visible error.
+        """
         activity_log = ActivityLog(task_id, "git_push")
+        branch = task.branch_name
 
         async def emit(chunk: str):
             await activity_log.write(chunk)
             return chunk
 
+        def run_git(cmd: str):
+            return docker_service.execute_command(
+                task.container_id, cmd, "/workspace/repo"
+            )
+
+        def rejected(text: str) -> bool:
+            t = text.lower()
+            return any(p in t for p in (
+                "[rejected]", "non-fast-forward", "failed to push", "fetch first",
+            ))
+
+        _GIT_ID = "-c user.name='Xolvien Bot' -c user.email='bot@xolvien.com'"
+
         try:
-            yield await emit(f"[GIT] ブランチ '{task.branch_name}' を push しています...\n")
-            try:
-                async for chunk in docker_service.execute_command_stream(
-                    task.container_id,
-                    f"git push -u origin {task.branch_name} 2>&1",
-                    "/workspace/repo",
-                ):
-                    yield await emit(chunk)
-            except Exception as e:
-                code = e.code if isinstance(e, XolvienError) else classify_exception(e)
-                yield await emit(error_sentinel_line(code, str(e)))
+            # Auto-repair: restore a missing origin remote / task branch
+            # (repos rebuilt by an older reset_workspace lost both, which
+            # made push fail with "'origin' does not appear to be a git
+            # repository" — previously misclassified as an auth failure).
+            rc, _out, _ = run_git("git remote get-url origin 2>/dev/null")
+            if rc != 0:
+                if not repository or not repository.url:
+                    yield await emit(error_sentinel_line(
+                        ErrorCode.GIT_PUSH_REJECTED,
+                        "no origin remote and no repository URL on record",
+                    ))
+                    return
+                yield await emit("[GIT] origin リモートが未設定のため復元します...\n")
+                rc, out, _ = run_git(f"git remote add origin {repository.url} 2>&1")
+                if rc != 0:
+                    yield await emit(error_sentinel_line(ErrorCode.GIT_PUSH_REJECTED, out))
+                    return
+            rc, _out, _ = run_git(f"git rev-parse --verify refs/heads/{branch} 2>/dev/null")
+            if rc != 0:
+                yield await emit(
+                    f"[GIT] ブランチ '{branch}' が存在しないため、現在のブランチを改名します...\n"
+                )
+                rc, out, _ = run_git(f"git branch -M {branch} 2>&1")
+                if rc != 0:
+                    yield await emit(error_sentinel_line(ErrorCode.GIT_PUSH_REJECTED, out))
+                    return
+
+            yield await emit(f"[GIT] ブランチ '{branch}' を push しています...\n")
+            rc, out, _ = run_git(f"git push -u origin {branch} 2>&1")
+            if out.strip():
+                yield await emit(out.rstrip("\n") + "\n")
+
+            if rc != 0 and rejected(out):
+                yield await emit(
+                    "\n[GIT] リモートに別の変更があるため拒否されました。自動解決します...\n"
+                )
+                rc, out, _ = run_git(f"git fetch origin {branch} 2>&1")
+                if out.strip():
+                    yield await emit(out.rstrip("\n") + "\n")
+                if rc != 0:
+                    yield await emit(error_sentinel_line(classify_text(out) if classify_text(out) != ErrorCode.UNKNOWN else ErrorCode.GIT_PUSH_REJECTED, out))
+                    return
+
+                yield await emit("[GIT] リモートの変更を取り込んでいます (rebase)...\n")
+                rc, out, _ = run_git(f"git {_GIT_ID} rebase origin/{branch} 2>&1")
+                if out.strip():
+                    yield await emit(out.rstrip("\n") + "\n")
+
+                if rc == 0:
+                    rc, out, _ = run_git(f"git push -u origin {branch} 2>&1")
+                else:
+                    # Divergent/conflicting history (Reset & Rebuild rewrites
+                    # it from scratch). The local state is the task's truth —
+                    # overwrite our own branch, guarded by the fresh lease.
+                    run_git("git rebase --abort 2>&1")
+                    yield await emit(
+                        "[GIT] 履歴が分岐しています（Reset & Rebuild 後の状態）。"
+                        "タスク専用ブランチのため上書き push します...\n"
+                    )
+                    rc, out, _ = run_git(
+                        f"git push --force-with-lease -u origin {branch} 2>&1"
+                    )
+                if out.strip():
+                    yield await emit(out.rstrip("\n") + "\n")
+
+            if rc != 0:
+                code = classify_text(out)
+                yield await emit(error_sentinel_line(
+                    code if code != ErrorCode.UNKNOWN else ErrorCode.GIT_PUSH_REJECTED, out
+                ))
                 return
-            # Note: git auth/reject failures surface as non-zero exit text inside the
-            # streamed chunks (HTTP status is already 200), so they are classified
-            # client-side from the accumulated stream text — not via this sentinel.
+
+            # fetch/rebase above ran as root — hand any newly created .git
+            # objects back to the agent user so later agent-side git works.
+            run_git(
+                "find /workspace/repo \\! -user xolvien "
+                "-exec chown xolvien:xolvien {} + 2>/dev/null || true"
+            )
             yield await emit("\n[GIT] push 完了\n")
+        except Exception as e:
+            code = e.code if isinstance(e, XolvienError) else classify_exception(e)
+            yield await emit(error_sentinel_line(code, str(e)))
         finally:
             await activity_log.close()
 

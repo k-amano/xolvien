@@ -2,6 +2,56 @@
 
 ---
 
+## 2026-08-02
+
+### Git Push: self-repairing, self-resolving — one button, no manual git
+
+Two incidents on the same button, both rooted in `reset_workspace` (Reset &
+Rebuild), which reinitialised `/workspace/repo` with `git init` and restored
+**neither the origin remote nor the task branch**:
+
+1. "Could not apply your changes" — the pre-rebuild branch still existed on
+   GitHub, so the rebuilt (divergent) history was rejected as
+   non-fast-forward. The UI told the user to "pull and push again", which is
+   impossible from the UI.
+2. "Git authentication failed" — after the first fix landed, push failed with
+   `'origin' does not appear to be a git repository / Could not read from
+   remote repository`, which the `fatal: could not read` pattern misclassified
+   as an auth failure. SSH auth was fine; the remote was simply gone.
+
+Fixes, in layers:
+
+- **Root cause** — `reset_workspace()` now takes `repository_url` /
+  `branch_name` (endpoint passes them from the DB) and restores the origin
+  remote + task branch in the rebuilt repo, with the bot git identity inline.
+- **Auto-repair on push** (heals repos broken by the old reset): missing
+  origin remote is re-added from the repository URL; missing task branch —
+  the current branch is renamed to it. Each repair step is announced in the
+  left pane.
+- **Auto-resolution on rejection**: fetch → rebase onto `origin/{branch}` →
+  re-push; if rebase cannot apply (divergent Reset & Rebuild history) —
+  abort and `push --force-with-lease` (safe: the lease was just fetched and
+  the branch is task-dedicated). Progress announced step by step.
+- **Fail-loud**: the endpoint now checks exit codes per git step and emits
+  the `[[XOLVIEN_ERROR:CODE]]` sentinel itself on any failure (whole stream
+  wrapped in try/except). The frontend's `classifyDoneText` text-scan was
+  removed — it would false-positive on a successfully auto-resolved push,
+  whose log legitimately contains the first attempt's `[rejected]` line.
+  `GIT_PUSH_REJECTED` banner copy (JA/EN) rewritten for "auto-resolution
+  also failed" (check log / branch protection).
+- After root-side fetch/rebase, repo ownership is normalized back to the
+  agent user.
+
+**Verified:** synthetic two-clone scenario in the container (reject →
+rebase → push, and rebuilt-root → force-with-lease) both resolved; full
+chain against the real GitHub remote on a copy of task 13's actual broken
+repo — remote restored, branch renamed, push rejected (proving SSH auth was
+never the problem), rebase failed as expected, `--force-with-lease`
+**dry-run** accepted (`forced update`) with no real-data change; backend
+py_compile + frontend typecheck/build clean.
+
+---
+
 ## 2026-07-28
 
 ### Single container-side user for everything that touches the repo

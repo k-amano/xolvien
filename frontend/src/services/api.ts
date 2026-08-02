@@ -286,9 +286,12 @@ export async function gitPushStream(
       method: 'POST',
       headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
     })
-    // git auth/reject failures arrive as in-stream text with HTTP 200, so scan
-    // the accumulated output on completion.
-    await pumpStream(response, onChunk, onDone, onError, { classifyDoneText: true })
+    // The backend checks exit codes per git step (with auto-resolution of
+    // rejected pushes) and emits the error sentinel on any failure, so the
+    // sentinel is authoritative here. Text-scanning the accumulated output
+    // would false-positive: a successfully auto-resolved push still contains
+    // the first attempt's "[rejected]" line.
+    await pumpStream(response, onChunk, onDone, onError)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     onError(classifyError(0, msg), msg)

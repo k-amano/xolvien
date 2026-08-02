@@ -1279,9 +1279,18 @@ ssh -T git@github.com
 
 If `Hi username!` appears, you're authenticated. If not, check your SSH key setup.
 
-**"rejected" or "failed to push":**
+**"rejected" or "failed to push" in the log:**
 
-Someone else may have pushed to the same branch. Delete the task and recreate it.
+When the remote has other changes (including after a Reset & Rebuild), the
+push **resolves itself automatically** (pull remote changes → re-push →
+overwrite-push of the task-dedicated branch if needed). The log shows the
+resolution steps; "push 完了" at the end means success.
+
+**"Could not apply your changes" error banner:**
+
+Automatic resolution also failed. Check the log area for the step that
+failed, and check whether branch protection (blocking force-push) is enabled
+on the GitHub repository.
 
 ---
 
